@@ -172,3 +172,24 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Vscode Debug
+.vscode
+data/retrieval
+data/clustering
+data/classification
+data/zip
+data/eval
+# qg/regen
+msmarco/marco
+eval/data
+qa/data
+beir/data
+models
+results/*
+!results/*.py
+outputs
+tfboard
+wandb
+# scripts/*.out
+*.out
