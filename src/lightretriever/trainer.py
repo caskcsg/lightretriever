@@ -33,7 +33,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 try:
-    from grad_cache import GradCache, GradCacheAC
+    from grad_cache import GradCache
     _grad_cache_available = True
 except ModuleNotFoundError:
     _grad_cache_available = False
@@ -366,15 +366,8 @@ class GCTrainer(ContrastiveTrainer):
                 'Grad Cache package not available. You can obtain it from https://github.com/luyug/GradCache.')
         super(GCTrainer, self).__init__(*args, **kwargs)
         
-        if self.args.grad_cache:
-            _gc_cls = GradCache
-        elif self.args.grad_cache_ac:
-            _gc_cls = GradCacheAC
-        else:
-            raise NotImplementedError()
-        
         assert self.accelerator is not None
-        self.gc = _gc_cls(
+        self.gc = GradCache(
             models=[self.model, self.model],
             chunk_sizes=[self.args.gc_q_chunk_size, self.args.gc_p_chunk_size],
             loss_fn=self.gc_loss_fn,
