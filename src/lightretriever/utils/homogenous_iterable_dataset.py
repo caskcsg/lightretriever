@@ -235,10 +235,10 @@ class HomogenousRandomlyCyclingMultiSourcesExamplesIterable(CyclingMultiSourcesE
             stopping_strategy=self.stopping_strategy,
         )
 
-    def shard_data_sources(self, worker_id: int, num_workers: int) -> "HomogenousRandomlyCyclingMultiSourcesExamplesIterable":
+    def shard_data_sources(self, worker_id: int, num_workers: int, contiguous: bool = False) -> "HomogenousRandomlyCyclingMultiSourcesExamplesIterable":
         """Either keep only the requested shard, or propagate the request to the underlying iterable."""
         return HomogenousRandomlyCyclingMultiSourcesExamplesIterable(
-            [iterable.shard_data_sources(worker_id, num_workers) for iterable in self.ex_iterables],
+            [iterable.shard_data_sources(worker_id, num_workers, contiguous) for iterable in self.ex_iterables],
             self.batch_size,
             self.generator,
             self.probabilities,
