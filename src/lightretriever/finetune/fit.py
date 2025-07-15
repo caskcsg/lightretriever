@@ -201,7 +201,7 @@ def main():
         )
 
     # Initialize our Trainer
-    trainer_cls = GCTrainer if training_args.grad_cache or training_args.grad_cache_ac else Trainer
+    trainer_cls = GCTrainer if training_args.grad_cache else Trainer
     trainer = trainer_cls(
         model=model,
         args=training_args,
