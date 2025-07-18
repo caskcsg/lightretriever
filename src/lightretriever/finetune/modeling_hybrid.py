@@ -168,7 +168,7 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
         
         # (Optional) Logits sampling: Original input ids
         if self.model_args.sparse_pool_from_original_input_ids:
-            mask = get_sparse_attention_mask(input_ids, attention_mask)
+            mask = get_sparse_attention_mask(input_ids, attention_mask, sep_token_id=self.sep_token_id)
             unique_input_token_ids = get_unique_token_ids(input_ids, mask)
             logits = get_scores_with_indices(logits, indices=unique_input_token_ids)
         
@@ -408,7 +408,7 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
                 logits = spr_proj.forward(sparse_hidden, **_spr_proj_kwargs)
             else:
                 # Aggregation: Proj then aggr
-                sparse_attention_mask = get_sparse_attention_mask(qry['input_ids'], qry['attention_mask'])
+                sparse_attention_mask = get_sparse_attention_mask(qry['input_ids'], qry['attention_mask'], sep_token_id=self.sep_token_id)
                 logits = aggregate(
                     sparse_hidden, 
                     lm_head=spr_proj, 
