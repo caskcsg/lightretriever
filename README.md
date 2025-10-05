@@ -78,7 +78,7 @@ An example to show how to encode with LightRetriever's sparse query token counts
 A full fine-tuned script to reproduce [lightretriever/lightretriever-llama3.1-8b](https://huggingface.co/lightretriever/lightretriever-llama3.1-8b) is released. All retriever fine-tuning with different LLM backbones shares the same training hyper-parameters as defined in this script.
 
 ### 1. Training Set Download
-Please clone all necessary [training sets](https://huggingface.co/lightretriever/lightretriever-qwen2.5-1.5b) to a local folder, e.g. `data/train`. Then set the correct path to preprocessed dictionary, such as `--preprocessed_dir data/train`. All needed training sets and the corresponding sampling weights are defined in [`config/data/exp-m.json`](config/data/exp-m.json).
+Please clone all necessary [training sets](https://huggingface.co/datasets/lightretriever/lightretriever-finetune-data) to a local folder, e.g. `data/train`. Then set the correct path to preprocessed dictionary, such as `--preprocessed_dir data/train`. All needed training sets and the corresponding sampling weights are defined in [`config/data/exp-m.json`](config/data/exp-m.json).
 
 ### 2. Fine-tuning
 Please refer to the reference script [`scripts/finetune_example.sh`](scripts/finetune_example.sh) to finetune LightRetriver. 

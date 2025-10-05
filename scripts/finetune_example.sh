@@ -15,7 +15,7 @@ SAVE_STEPS=2000             # Interval of saving steps. Works with SAVE_STRATEGY
 SAVE_TOTAL_LIMIT=6          # Limits of saved checkpoints
 SAVE_STRATEGY="no"          # Huggingface Trainer save strategy. Choose among 'steps', 'epoch', 'no'
 
-MODEL_PATH=meta-llama/Meta-Llama-3.1-8B   # Base Model to initialize from
+MODEL_PATH=meta-llama/Llama-3.1-8B        # Base Model to initialize from
 OUTPUT_DIR=$BASE_DIR/results/$TRAIL_NAME  # Path to save fine-tuned retrievers
 LOG_DIR=$BASE_DIR/logs/$TRAIL_NAME/dpr    # Path to log folder
 mkdir -p $LOG_DIR
