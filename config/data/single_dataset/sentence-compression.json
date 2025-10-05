@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "sentence-compression": 0
+    },
+    "domain_weights": {
+        "sentence-compression": 1.0
+    },
+    "size": {
+        "sentence-compression": 180000
+    },
+    "epoch": {
+        "sentence-compression": 1.0
+    }
+}

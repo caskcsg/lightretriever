@@ -7,32 +7,41 @@ Hybrid (Dense + Sparse) Model Implementation.
 @Author  :   Ma (Ma787639046@outlook.com)
 '''
 import os
-from typing import Optional
+import time
+from typing import Callable, Optional
 from collections import defaultdict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 from transformers import (
     AutoModelForMaskedLM, 
     AutoModelForCausalLM, 
     BatchEncoding, 
     AutoTokenizer, 
-    PreTrainedTokenizerBase,
     PreTrainedModel,
     BertForMaskedLM,
     XLMRobertaForMaskedLM,
     XLMRobertaForCausalLM,
     GPTNeoXForCausalLM,
+    LlamaForCausalLM, 
+    MistralForCausalLM, 
+    PhiForCausalLM, 
+    Qwen2ForCausalLM,
 )
-from transformers.modeling_outputs import BaseModelOutput
+from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_outputs import BaseModelOutput, CausalLMOutputWithPast
+from transformers.models.bert.modeling_bert import BertLMPredictionHead
+from transformers.models.xlm_roberta.modeling_xlm_roberta import XLMRobertaLMHead
 from peft import PeftModel
 
 from .arguments import ModelArguments, DataArguments, \
     RetrieverTrainingArguments as TrainingArguments
 from ..utils.nested_input import apply_seqlen_cumulate
+from ..utils.monkey_patch import apply_bidirectional_attention
 from .dense_pooling import pooling, mean_eos_pooling
 from .dense_projector import DenseLinearProjector
 from .modeling_encoder import EncoderModel, EncoderOutput
@@ -104,19 +113,25 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
         # Init parent
         EncoderModel.__init__(self, lm_q=lm_q, lm_p=lm_p, model_args=model_args, train_args=train_args, data_args=data_args, den_pooler_q=den_pooler_q, den_pooler_p=den_pooler_p)
 
-        # Re-wrap cumulative forward
+        # Re-wrap forward monkey patches
         if self.model_args.cumulative_seq:
             apply_seqlen_cumulate(self.lm_p_base_unwrap)
             if self.model_args.untie_encoder:
                 apply_seqlen_cumulate(self.lm_q_base_unwrap)
+        
+        if self.model_args.enable_bidirectional_attention:
+            apply_bidirectional_attention(self.lm_p_base_unwrap)
+            if self.model_args.untie_encoder:
+                apply_bidirectional_attention(self.lm_q_base_unwrap)
 
         # Vocab related
         tokenizer = self.load_tokenizer(model_args.model_name_or_path, model_args=model_args)
         self.vocab_dict = {v: k.strip("'") for k, v in tokenizer.get_vocab().items()}    # idx -> token
         self.sep_token_id = tokenizer.sep_token_id
         self.eos_token_id = tokenizer.eos_token_id
-        ## Init sparse converter mixin
+        ## Init mixins
         SparseConverterMixin.__init__(self, self.vocab_dict)
+        EmbeddingBagMixin.__init__(self)
 
         # Sparse Projector project the representations from `hidden_dim` to `vocab_dim`
         self.spr_pooler_q = spr_pooler_q
@@ -167,8 +182,9 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
             logits = get_scores_with_indices(logits, indices=unique_token_ids)
         
         # (Optional) Logits sampling: Original input ids
-        if self.model_args.sparse_pool_from_original_input_ids:
-            mask = get_sparse_attention_mask(input_ids, attention_mask, sep_token_id=self.sep_token_id)
+        if (is_query and self.model_args.sparse_pool_from_original_input_ids_qry) or \
+            ((not is_query) and self.model_args.sparse_pool_from_original_input_ids_psg):
+            mask = get_sparse_attention_mask(input_ids, attention_mask, sep_token_id=self.sep_token_id, remove_prompt=self.model_args.add_sep_token) # [TODO] Fix remove_prompt for BERT-like models, which depends on [SEP] at last but not prompt seperator
             unique_input_token_ids = get_unique_token_ids(input_ids, mask)
             logits = get_scores_with_indices(logits, indices=unique_input_token_ids)
         
@@ -224,9 +240,13 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
         if psg is None:
             return None
         
+        normalize = normalize or (normalize is None and self.model_args.normalize)
         encode_dense = encode_dense or (encode_dense is None and self.model_args.hybrid_use_dense_vector)
         encode_sparse = encode_sparse or (encode_sparse is None and self.model_args.hybrid_use_sparse_vector)
 
+        # To support LightRetriever Asymmetric Retrieval
+        ## query emb vec <-> passage dense vec
+        ## query token id vec <-> passage sparse vec
         if self.model_args.hybrid_use_emb_vector:
             encode_dense = True
 
@@ -236,7 +256,7 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
         # Format Inputs
         forward_kwargs = {
             'input_ids': psg['input_ids'],
-            'attention_mask': psg['attention_mask'],
+            'attention_mask': psg.get('attention_mask', None),
         }
         for optional_input_field in ['token_type_ids', 'position_ids']:
             if optional_input_field in psg:
@@ -255,15 +275,15 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
             p_reps = pooling(
                 last_hidden=psg_out.last_hidden_state,
                 hidden_states=psg_out.hidden_states,
-                attention_mask=psg['attention_mask'],
+                attention_mask=psg.get('attention_mask', None),
                 pooling_strategy=self.model_args.pooling_strategy_psg,
             )
             if self.den_pooler_p is not None:
                 p_reps = self.den_pooler_p(p_reps)  # D * d
             if self.model_args.dense_shrink_dim:
                 p_reps = p_reps[..., :self.model_args.dense_shrink_dim]
-            if normalize or (normalize is None and self.model_args.normalize):
-                p_reps = F.normalize(p_reps, p=2, dim=1)
+            if normalize:
+                p_reps = F.normalize(p_reps, p=2, dim=-1)
             p_reps_dict["dense_reps"] = p_reps
         
         ## Get Sparse Emb
@@ -275,7 +295,7 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
                 # Pooling: Pool then proj
                 sparse_hidden = pooling(
                     sparse_hidden, 
-                    attention_mask=psg['attention_mask'], 
+                    attention_mask=psg.get('attention_mask', None), 
                     pooling_strategy=self.model_args.sparse_pooling_strategy
                 )   # [batch_size, hidden_dim]
 
@@ -287,8 +307,9 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
             else:
                 # Aggregation: Proj then aggr
                 sparse_attention_mask = get_sparse_attention_mask(
-                    psg['input_ids'], psg['attention_mask'], sep_token_id=self.sep_token_id
-                )
+                    psg['input_ids'], psg['attention_mask'], sep_token_id=self.sep_token_id, 
+                    remove_prompt=self.model_args.add_sep_token
+                ) # [TODO] Fix remove_prompt for BERT-like models, which depends on [SEP] at last but not prompt seperator
                 logits = aggregate(
                     sparse_hidden, 
                     lm_head=spr_proj, 
@@ -298,7 +319,7 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
             
             # Sparsify
             aggregated_psg_out = self.get_sparse_emb(
-                logits, is_query=False, input_ids=psg['input_ids'], attention_mask=psg['attention_mask'],
+                logits, is_query=False, input_ids=psg['input_ids'], attention_mask=psg.get('attention_mask', None),
                 unique_token_ids=psg['unique_token_ids']
             )
             
@@ -306,7 +327,7 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
             # https://github.com/naver/splade/issues/64
             # https://github.com/naver/splade/issues/34
             # if normalize or (normalize is None and self.model_args.normalize):
-            #     aggregated_psg_out = F.normalize(aggregated_psg_out, p=2, dim=1)
+            #     aggregated_psg_out = F.normalize(aggregated_psg_out, p=2, dim=-1)
 
             p_reps_dict["sparse_reps"] = aggregated_psg_out
 
@@ -347,17 +368,18 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
         if qry is None:
             return None
         
+        normalize = normalize or (normalize is None and self.model_args.normalize)
         encode_dense = encode_dense or (encode_dense is None and self.model_args.hybrid_use_dense_vector)
         encode_sparse = encode_sparse or (encode_sparse is None and self.model_args.hybrid_use_sparse_vector)
         encode_emb_reps = encode_emb_reps or (encode_emb_reps is None and self.model_args.hybrid_use_emb_vector)
         encode_token_id_reps = encode_token_id_reps or (encode_token_id_reps is None and self.model_args.hybrid_use_token_id_vector)
-        use_model = encode_dense or encode_sparse
-        
-        if use_model:
+
+        # No model forward is needed when `encode_emb_reps` / `encode_token_id_reps`
+        if use_model := encode_dense or encode_sparse:
             # Format Inputs
             forward_kwargs = {
                 'input_ids': qry['input_ids'],
-                'attention_mask': qry['attention_mask'],
+                'attention_mask': qry.get('attention_mask', None),
             }
             for optional_input_field in ['token_type_ids', 'position_ids']:
                 if optional_input_field in qry:
@@ -376,20 +398,20 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
             q_reps = pooling(
                 last_hidden=qry_out.last_hidden_state,
                 hidden_states=qry_out.hidden_states,
-                attention_mask=qry['attention_mask'],
+                attention_mask=qry.get('attention_mask', None),
                 pooling_strategy=self.model_args.pooling_strategy_qry,
             )
             if self.den_pooler_q is not None:
                 q_reps = self.den_pooler_q(q_reps)  # D * d
             if self.model_args.dense_shrink_dim:
                 q_reps = q_reps[..., :self.model_args.dense_shrink_dim]
-            if normalize or (normalize is None and self.model_args.normalize):
-                q_reps = F.normalize(q_reps, p=2, dim=1)
+            if normalize:
+                q_reps = F.normalize(q_reps, p=2, dim=-1)
             
             q_reps_dict["dense_reps"] = q_reps
         
         ## Get Sparse Emb
-        if encode_sparse:            
+        if encode_sparse:
             # Sparse Pooling
             sparse_hidden = qry_out.last_hidden_state   # [batch_size, seq_len, hidden_dim]
             spr_proj = self.spr_pooler_q or get_lm_head(self.lm_q) 
@@ -397,7 +419,7 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
                 # Pooling: Pool then proj
                 sparse_hidden = pooling(
                     sparse_hidden, 
-                    attention_mask=qry['attention_mask'], 
+                    attention_mask=qry.get('attention_mask', None), 
                     pooling_strategy=self.model_args.sparse_pooling_strategy
                 )   # [batch_size, hidden_dim]
 
@@ -408,7 +430,7 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
                 logits = spr_proj.forward(sparse_hidden, **_spr_proj_kwargs)
             else:
                 # Aggregation: Proj then aggr
-                sparse_attention_mask = get_sparse_attention_mask(qry['input_ids'], qry['attention_mask'], sep_token_id=self.sep_token_id)
+                sparse_attention_mask = get_sparse_attention_mask(qry['input_ids'], qry['attention_mask'], sep_token_id=self.sep_token_id, remove_prompt=self.model_args.add_sep_token) # [TODO] Fix remove_prompt for BERT-like models, which depends on [SEP] at last but not prompt seperator
                 logits = aggregate(
                     sparse_hidden, 
                     lm_head=spr_proj, 
@@ -418,13 +440,13 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
             
             # Sparsify
             aggregated_qry_out = self.get_sparse_emb(
-                logits, is_query=True, input_ids=qry['input_ids'], attention_mask=qry['attention_mask'],
-                unique_token_ids=qry['unique_token_ids']
+                logits, is_query=True, input_ids=qry['input_ids'], attention_mask=qry.get('attention_mask', None),
+                unique_token_ids=qry.get('unique_token_ids', None), 
             )
             
             # TODO: Not sure if we need normalization for sparse embedding!
-            # if normalize or (normalize is None and self.model_args.normalize):
-            #     aggregated_qry_out = F.normalize(aggregated_qry_out, p=2, dim=1)
+            # if normalize:
+            #     aggregated_qry_out = F.normalize(aggregated_qry_out, p=2, dim=-1)
 
             q_reps_dict["sparse_reps"] = aggregated_qry_out
         
@@ -467,14 +489,14 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
                 inputs_embeds: Tensor = emb_layer(qry['input_ids'])
                 emb_reps = pooling(
                     last_hidden=inputs_embeds,
-                    attention_mask=qry['attention_mask'],
+                    attention_mask=qry.get('attention_mask', None),
                     pooling_strategy='mean',
                 )
             
             if self.model_args.dense_shrink_dim:
                 emb_reps = emb_reps[..., :self.model_args.dense_shrink_dim]
-            if normalize or (normalize is None and self.model_args.normalize):
-                emb_reps = F.normalize(emb_reps, p=2, dim=1)
+            if normalize:
+                emb_reps = F.normalize(emb_reps, p=2, dim=-1)
             q_reps_dict["emb_reps"] = emb_reps
         
         ## Get Bag-of-word Token id reps
@@ -675,6 +697,24 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
                     ce_scores, only_hn, loss, scores, logs,
                     score_name="imb_dense", log_prefix="mrl_loss/imbden_", log_suffix=f"-dim{mrl_dim}", **kwargs
                 )
+                
+                if self.train_args.emb_den_reps_distillation:
+                    # Distillation: q_emb_reps -> q_dense_reps
+                    assert use_dense, "Please enable `use_dense` to distill q_emb_reps -> q_dense_reps."
+                    loss, logs = self._call_kl_loss(
+                        self.shrink(q_emb_reps, mrl_dim), self.shrink(q_dense_reps, mrl_dim).detach(),
+                        self.train_args.emb_reps_distill_coef, loss, logs,
+                        log_prefix="mrl_loss/emb_den_reps_", log_suffix=f"-dim{mrl_dim}", **kwargs,
+                    )
+                
+                if self.train_args.emb_den_scores_distillation:
+                    # Distillation: q_emb_reps * p_dense_reps -> q_dense_reps * p_dense_reps
+                    assert use_dense, "Please enable `use_dense` to distill q_emb_reps * p_dense_reps -> q_dense_reps * p_dense_reps."
+                    loss, logs = self._call_kl_loss(
+                        imb_dense_lm_out.scores, dense_lm_out.scores.detach(), 
+                        self.train_args.emb_reps_distill_coef, loss, logs,
+                        log_prefix="mrl_loss/emb_den_scores_", log_suffix=f"-dim{mrl_dim}", **kwargs,
+                    )
         
         # Asymmetric Sparse (Token id reps)
         if use_token_id_reps := (q_token_id_reps is not None) and (p_sparse_reps is not None):
@@ -684,6 +724,18 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
                 temperature=self.train_args.sparse_temperature, # Override sparse temperature
                 **kwargs
             )
+            
+            if self.train_args.tok_den_scores_distillation:
+                # Distillation: q_token_id_reps * p_sparse_reps -> q_dense_reps * p_dense_reps
+                assert use_dense, "Please enable `use_dense` to distill q_token_id_reps * p_sparse_reps -> q_dense_reps * p_dense_reps."
+
+                # Sparse reps uses dot product
+                # Dense reps uses cosine similarity
+                # Thus only dense reps needs to be scaled by temperature
+                loss, logs = self._call_kl_loss(
+                    imb_sparse_lm_out.scores, dense_lm_out.scores.detach(), self.train_args.tok_reps_distill_coef, loss, logs,
+                    log_prefix="tok_den_scores_", **kwargs,
+                )
         
         # All regulators, gates, sparsifier losses
         apply_query_regulations = use_sparse
@@ -786,15 +838,17 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
         return lm_out
     
     @staticmethod
-    def rowwise_nonzero_stats(x, scale_factor=100):
+    def rowwise_nonzero_stats(x: Tensor, scale_factor=100):
+        assert x.dim() == 2, "Input tensor must be 2-dimensional"
+
         mask = x != 0
         x_nonzero = [row[mask[i]] for i, row in enumerate(x)]  # Get non-zero elements of each row
 
         # Calculate stats
-        max_vals = torch.tensor([row.max() if len(row) > 0 else 0 for row in x_nonzero], device=x.device)
-        min_vals = torch.tensor([row.min() if len(row) > 0 else 0 for row in x_nonzero], device=x.device)
-        mean_vals = torch.tensor([row.float().mean() if len(row) > 0 else 0 for row in x_nonzero], device=x.device)
-        median_vals = torch.tensor([row.float().median() if len(row) > 0 else 0 for row in x_nonzero], device=x.device)
+        max_vals = torch.tensor([row.max() if len(row) > 0 else 0 for row in x_nonzero], dtype=torch.float32, device=x.device)
+        min_vals = torch.tensor([row.min() if len(row) > 0 else 0 for row in x_nonzero], dtype=torch.float32, device=x.device)
+        mean_vals = torch.tensor([row.float().mean() if len(row) > 0 else 0 for row in x_nonzero], dtype=torch.float32, device=x.device)
+        median_vals = torch.tensor([row.float().median() if len(row) > 0 else 0 for row in x_nonzero], dtype=torch.float32, device=x.device)
 
         # Calculate `x * scale_factor` then round as int, sum to get nonzero scaled counts
         x_scaled = torch.floor(x * scale_factor)
@@ -836,12 +890,12 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
 
             init_lm_head = get_lm_head(model.lm_p)
             init_weight = init_lm_head.weight if isinstance(init_lm_head, nn.Linear) else None
-            model.spr_pooler_p = SparseLinearProjector.build(hidden_dim, vocab_size, init_weight=init_weight)
+            model.spr_pooler_p = SparseLinearProjector.build(hidden_dim, vocab_size, model_dir=model_args.model_name_or_path_psg, init_weight=init_weight)
 
             if model_args.untie_encoder:
                 init_lm_head = get_lm_head(model.lm_q)
                 init_weight = init_lm_head.weight if isinstance(init_lm_head, nn.Linear) else None
-                model.spr_pooler_q = SparseLinearProjector.build(hidden_dim, vocab_size, init_weight=init_weight)
+                model.spr_pooler_q = SparseLinearProjector.build(hidden_dim, vocab_size, model_dir=model_args.model_name_or_path_qry, init_weight=init_weight)
             else:
                 model.spr_pooler_q = model.spr_pooler_p
         
@@ -850,12 +904,12 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
 
             init_lm_head = get_lm_head(model.lm_p)
             init_weight = init_lm_head.weight if isinstance(init_lm_head, nn.Linear) else None
-            model.spr_pooler_p = SparseDownProjector.build(vocab_size=vocab_size, hidden_dim=hidden_dim, init_weight=init_weight)
+            model.spr_pooler_p = SparseDownProjector.build(vocab_size=vocab_size, hidden_dim=hidden_dim, model_dir=model_args.model_name_or_path_psg, init_weight=init_weight)
 
             if model_args.untie_encoder:
                 init_lm_head = get_lm_head(model.lm_q)
                 init_weight = init_lm_head.weight if isinstance(init_lm_head, nn.Linear) else None
-                model.spr_pooler_q = SparseDownProjector.build(vocab_size=vocab_size, hidden_dim=hidden_dim, init_weight=init_weight)
+                model.spr_pooler_q = SparseDownProjector.build(vocab_size=vocab_size, hidden_dim=hidden_dim, model_dir=model_args.model_name_or_path_qry, init_weight=init_weight)
             else:
                 model.spr_pooler_q = model.spr_pooler_p
         
@@ -878,6 +932,10 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
             model_args: All hyper-parameters for inferencing.
             train_args: Optional. Do not needed for inferencing.
         """
+        # Resume model_args if not set
+        if model_args is None:
+            model_args = cls._load_model_args(model_name_or_path)
+        
         # Transformers cls
         if model_args.hybrid_model_architecture == 'gpt':
             cls.TRANSFORMER_CLS = AutoModelForCausalLM
@@ -910,7 +968,7 @@ class HybridModel(EncoderModel, EmbeddingBagMixin, SparseConverterMixin):
     def save(self, output_dir: str, state_dict: dict[str, any]=None, **hf_kwargs):
         super(HybridModel, self).save(output_dir, state_dict, **hf_kwargs)
 
-        if self.model_args.use_sparse_linear_projector or self.model_args.use_sparse_down_projector:
+        if self.spr_pooler_p is not None:
             if self.model_args.untie_encoder:
                 self.spr_pooler_p.save_pooler(os.path.join(output_dir, 'passage_model'), state_dict=self._get_prefix_dict(state_dict, 'spr_pooler_p.'))
                 self.spr_pooler_q.save_pooler(os.path.join(output_dir, 'query_model'), state_dict=self._get_prefix_dict(state_dict, 'spr_pooler_q.'))

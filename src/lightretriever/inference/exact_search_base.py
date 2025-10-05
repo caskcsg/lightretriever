@@ -1,31 +1,27 @@
 #!/usr/bin/python
 # -*- encoding: utf-8 -*-
 '''
-copied from eval/modeling_utils.py
+Base class for Exact Search Model.
 
-ExactSearchModel encodes embeddings with PyTorch RPC remote calls.
+ExactSearchModel encodes embeddings with 
+1. PyTorch Single Process.
+2. PyTorch RPC remote calls.
 
 @Time    :   2025/01/02
 @Author  :   Ma (Ma787639046@outlook.com)
 '''
-import math
+
 import os
 import time
-import atexit
+import math
 import logging
 import numpy as np
-import queue
-from threading import Thread
-from queue import Queue
-from tqdm import tqdm
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Union
 
 import torch
 import torch.utils.data
-import torch.distributed.rpc as rpc
-import torch.multiprocessing as mp
 from torch import Tensor
 
 import datasets
@@ -35,21 +31,16 @@ from transformers.tokenization_utils import PreTrainedTokenizerBase, BatchEncodi
 from sparse_emb_util import ICUWordPreTokenizer
 
 from .arguments import InferenceArguments
-from .utils import move_to_cuda
+from .utils import move_to_device, device_context, empty_cache
 from ..finetune.modeling_encoder import EncoderModel
 from ..finetune.modeling_hybrid import HybridModel
 from ..finetune.nonctx_emb_utils import tokenize_nonctx_qry_emb_bag, construct_embedding_bag_parallel
-from ..utils.data_utils import STOPWORD_SETS
+from ..utils.data_utils import get_icu_word_pretokenizer
 
 logger = logging.getLogger(__name__)
 
-_MODEL_CLS: dict[str, EncoderModel | HybridModel] = {
-    "EncoderModel": EncoderModel,
-    "HybridModel": HybridModel,
-}
-
 @dataclass
-class ExactSearchModel:
+class ExactSearchModelBase:
     """
     A Wrapper for EncoderModel.
     
@@ -57,76 +48,12 @@ class ExactSearchModel:
     This class converts a MTEB model (with just an .encode method) into BeIR DRES format.
     """
     args: InferenceArguments
+    model: Optional[EncoderModel | HybridModel] = None
+    tokenizer: Optional[PreTrainedTokenizerBase] = None
 
-    # Only used by the RPC main process
     query_prompt: Optional[str] = None
     corpus_prompt: Optional[str] = None
     encoding_kwargs: dict[str, any] = field(default_factory=dict)
-
-    def __post_init__(self):
-        assert self.args.world_size > 0 and self.args.local_rank >= 0, \
-            "Please use rpc encoding with torchrun"
-
-        # Process input/output data, send encoding message only in main rank
-        if self.args.local_rank == 0:
-            self.input_queue = mp.Queue()
-            self.output_queue = mp.Queue()
-            self.lower_boundary_of_queue_size: int = 32
-            self.up_boundary_of_queue_size: int = 64
-            assert self.up_boundary_of_queue_size > self.lower_boundary_of_queue_size
-
-            # Feeder threader
-            # 1) Fetch a data from input queue
-            # 2) Execute RPC call with rank=device_id
-            # 3) Put returns to output queue
-            self.threads: list[Thread] = []
-            for device_id in range(self.args.world_size):
-                p = Thread(
-                    target=self._start_mt,
-                    args=(device_id, self.args, self.input_queue, self.output_queue),
-                    daemon=True,   # Auto destruct all feeder threads
-                )
-                p.start()
-                self.threads.append(p)
-
-        self.tokenizer = EncoderModel.load_tokenizer(self.args.model_name_or_path, self.args)
-        self.model = _MODEL_CLS[self.args.model_type].load(
-            model_name_or_path=self.args.model_name_or_path,
-            model_args=self.args,
-            # HF Argument
-            attn_implementation=self.args.attn_implementation,
-            torch_dtype=self.args.dtype,
-            device_map=self.args.local_rank,
-            # device_map=0,   # `CUDA_VISIBLE_DEVICES` is set when int(local_rank) > 0
-            # device_map="auto" if os.getenv("CUDA_VISIBLE_DEVICES") else target_device,
-        ).eval()
-        
-        global MODEL_REGISTRY
-        MODEL_REGISTRY = {"worker": self}
-
-        atexit.register(self.__del__)
-
-        # Inject Anserini specific arguments
-        self.encoding_kwargs["anserini_vector_type"] = self.args.anserini_vector_type
-    
-    def __del__(self):
-        """
-        Stops all processes started with start_multi_process_pool
-        """
-        if self.args.local_rank == 0:
-            if self.threads is not None:
-                # Sending close signal chunk_id = None to all processes
-                for _ in range(len(self.threads)):
-                    self.input_queue.put([None])
-                
-                for p in self.threads:
-                    p.join(timeout=10)
-            
-            if self.input_queue is not None:
-                self.input_queue.close()
-
-            if self.output_queue is not None:
-                self.output_queue.close()
     
     def parse_texts(
         self,
@@ -265,194 +192,23 @@ class ExactSearchModel:
         # like `score_function`, please directly modify the model
         # TODO: Support `encoding_kwargs` recently added by MTEB
         **kwargs
-    ) -> Union[Tensor, np.ndarray]:
-        # Support of EmbeddingBag
-        if noncontextual_query_embedding := self.args.noncontextual_query_embedding and encode_is_query:
-            # Construct EmbeddingBag on Rank0
-            emb_bag_prompt = self.query_prompt or dataset[0].get("prompt", None)    # str / None
-            if self.args.noncontextual_prompt_prefix and emb_bag_prompt:
-                emb_bag_prompt = self.args.noncontextual_prompt_prefix + emb_bag_prompt
-            elif self.args.noncontextual_prompt_prefix and (not emb_bag_prompt):
-                emb_bag_prompt = self.args.noncontextual_prompt_prefix
-            
-            emb_bag_exists = self.model.emb_bag is not None
-            emb_bag_need_recompute = self.model.emb_bag_prompt != emb_bag_prompt
-            if (not emb_bag_exists) or (emb_bag_exists and emb_bag_need_recompute):
-                # Need to compute a new EmbeddingBag
-                emb_bag = construct_embedding_bag_parallel(
-                    hidden_size=self.model.lm_q_base_unwrap.config.hidden_size,
-                    tokenizer=self.tokenizer,
-                    encode_func=_rpc_lm_q_encode_last_pooling_parallel,
-                    input_queue=self.input_queue,
-                    output_queue=self.output_queue,
-                    prompt=emb_bag_prompt, 
-                    batch_size=self.args.eval_batch_size_embedding_bag
-                )
-                self.empty_cache()
-
-                for rank in range(self.args.world_size):
-                    rpc.rpc_sync(
-                        rank, 
-                        _rpc_set_embedding_bag, 
-                        kwargs={
-                            "emb_bag": emb_bag,
-                            "emb_bag_prompt": emb_bag_prompt,
-                        }
-                    )
-        
-        if self.args.debug:
-            num_workers = 0
-        
-        # Reduce num_workers if batches are not too large
-        num_workers = min(num_workers, max(1, math.ceil(len(dataset) / batch_size) // 4))
-
-        data_iter = torch.utils.data.DataLoader(
-            dataset, 
-            batch_size=batch_size, 
-            # Python Multi-Processing duplicates in-memory python dataset because of Reference Counts.
-            # See: https://github.com/pytorch/pytorch/issues/13246#issuecomment-905703662
-            #
-            # Posiable Fix: Use HF dataset
-            num_workers=num_workers,
-            pin_memory=True,
-            collate_fn=EncodeCollator(
-                self.tokenizer, padding=self.args.padding, 
-                max_length=self.args.q_max_len if encode_is_query else self.args.p_max_len,
-                emb_size=self.model.lm_p.get_input_embeddings().weight.shape[0],
-                sparse_remove_stopwords=self.args.sparse_remove_stopwords,
-                use_icu_word_pretokenizer=self.args.use_icu_word_pretokenizer,
-                noncontextual_query_embedding=noncontextual_query_embedding,
-                noncontextual_prompt_prefix=self.args.noncontextual_prompt_prefix,
-                token_id_vector_type=self.args.token_id_vector_type,
-            ),
-        )
-
-        input_cnt, output_cnt = 0, 0
-        pbar = tqdm(
-            total=len(data_iter), mininterval=10, disable=(not show_progress_bar), 
-            desc=f"Encoding {'query' if encode_is_query else 'corpus'} [n_gpu={self.args.world_size}, bs={batch_size}]"
-        )
-
-        encoded_embeds: dict[str, dict[int, Tensor | str | list]] = dict()    # emb_name -> chunk_id -> emb
-
-        def put_emb_to_dict(output_chunk_id: int, emb: Tensor | np.ndarray | list[str] | list[dict] | dict[str, any]):
-            """ Helper function to put `emb` to `encoded_embeds`.
-                Note:
-                    Dense reps (Tensor | np.ndarray)
-                    Sparse reps (list[str] | list[dict])
-                    Hybrid reps (dict[str, Tensor | np.ndarray | list[str] | list[dict]])
-            """
-            if isinstance(emb, (Tensor, np.ndarray)):
-                emb = {'dense_reps': emb}
-            elif isinstance(emb, list):
-                emb = {'sparse_reps': emb}
-            
-            assert isinstance(emb, dict), "Unrecognized type {type(emb)} for emb. Please encode embeddings as Tensor / np.ndarray / list / dict[str, any]"
-            for k, v in emb.items():
-                if k not in encoded_embeds:
-                    encoded_embeds[k] = dict()
-                encoded_embeds[k][output_chunk_id] = v
-
-        for chunk_id, batch in enumerate(data_iter):
-            if self.args.debug:
-                emb = _rpc_encode(batch, encode_is_query, self.encoding_kwargs)
-                put_emb_to_dict(chunk_id, emb)
-                pbar.update()
-            else:
-                self.input_queue.put([chunk_id, _rpc_encode, batch, encode_is_query, self.encoding_kwargs])
-                input_cnt += 1
-
-                # If queue size exceeds the up_boundary, we will fetch some data before sending
-                # more chunk to the input queue. This avoids the overwhelm of Process's queue
-                if input_cnt - output_cnt > self.up_boundary_of_queue_size:
-                    while input_cnt - output_cnt > self.lower_boundary_of_queue_size:
-                        output_chunk_id, emb = self.output_queue.get()
-                        put_emb_to_dict(output_chunk_id, emb)
-                        output_cnt += 1
-                        pbar.update()
-        
-        for _ in range(input_cnt - output_cnt):
-            output_chunk_id, emb = self.output_queue.get()
-            put_emb_to_dict(output_chunk_id, emb)
-            output_cnt += 1
-            pbar.update()
-
-        pbar.close()
-
-        # Compatiable issue: If emb is natually dict format, we should also return them in dict format
-        return_dict_format_results = True if isinstance(emb, dict) else False
-        # Concat Tensor
-        logger.info("Collecting encoded embeddings...")
-        for k in encoded_embeds.keys():
-            if isinstance(encoded_embeds[k][0], Tensor):
-                encoded_embeds[k] = torch.cat([encoded_embeds[k][i] for i in range(len(encoded_embeds[k]))], dim=0)
-                if not convert_to_tensor:
-                    encoded_embeds[k] = encoded_embeds[k].numpy()
-            elif isinstance(encoded_embeds[k][0], np.ndarray):
-                encoded_embeds[k] = np.concatenate([encoded_embeds[k][i] for i in range(len(encoded_embeds[k]))], axis=0)
-            elif isinstance(encoded_embeds[k][0], list):
-                _collected_list_emb: list[any] = []
-                for i in range(len(encoded_embeds[k])):
-                    _collected_list_emb.extend(encoded_embeds[k][i])
-                encoded_embeds[k] = _collected_list_emb
-            else:
-                raise TypeError(f"Unable to collect embeddings with type {type(encoded_embeds[k][0])}.")
-        
-        # Clear up cache
-        self.empty_cache()
-
-        if return_dict_format_results:
-            return encoded_embeds
-        else:
-            emb_names: list[str] = list(encoded_embeds.keys())
-            assert len(emb_names) == 1, "Not single representations, please encode multi-representations with dict[str, any] format"
-            return encoded_embeds[emb_names[0]]
+    ) -> Union[
+        Tensor, np.ndarray,             # Single emb type - dense
+        list[str | dict[str, int]],     # Single emb type - sparse
+        dict[str, Tensor | np.ndarray | list[str | dict[str, int]]],    # Multi emb types
+    ]:
+        raise NotImplementedError("Abstract class. Override this function for detailed implementation.")
     
-    @classmethod
-    def _start_mt(cls, target_device: int, args: InferenceArguments, input_queue: Queue, results_queue: Queue):
-        """ Start method of multi-processing """
-        while True:
-            try:
-                chunk_id, *args = input_queue.get()
-                if chunk_id is None:  # Use chunk_id == None as close signal
-                    logging.warning(f"[{target_device}] Exit Signal received, terminating..")
-                    break
-                
-                assert len(args) >= 1, "Please pass a function pointer which is pickle serializable."
-                # Unpack function pointer
-                func, *args = args
-                assert isinstance(func, Callable)
 
-                rpc_call_success: bool = False
-                retry_cnt: int = 3
-                retry_interval: float = 2.0
-                while (rpc_call_success is False) and (retry_cnt > 0):
-                    try:
-                        rets = rpc.rpc_sync(target_device, func, args=args)
-                        rpc_call_success = True
-                    except RuntimeError as e:
-                        logger.error(e)
-                        logger.error(f"[target_device: {target_device}] Retry counts: {retry_cnt}. Retrying after {retry_interval}s...")
-                        retry_cnt -= 1
-                        time.sleep(retry_interval)
-                        rpc.rpc_sync(target_device, _cuda_empty_cache)
-
-                results_queue.put((chunk_id, rets))
-            except queue.Empty:
-                break
-    
-    def empty_cache(self):
-        for rank in range(self.args.world_size):
-            rpc.rpc_sync(rank, _cuda_empty_cache)
-            # rpc.rpc_sync(rank, torch.cuda.empty_cache)
 
 def call_batch_encode(model: EncoderModel | HybridModel, batch: dict | BatchEncoding, encode_is_query: bool, encoding_kwargs: dict):
     """ Call model encode with tokenized batch inputs, do necessary post-processings: 
         1. Dense Embedding: Move to cpu.
         2. Sparse Embedding: Convert to String (query) / dict (passage) format.
     """
-    batch = move_to_cuda(batch, device=model.lm_p.device)
-    with torch.no_grad(), torch.autocast(device_type="cuda"), torch.cuda.device(model.lm_p.device):
+    device = model.lm_p.device
+    batch = move_to_device(batch, device=device)
+    with torch.no_grad(), torch.autocast(device.type), device_context(device):
         if encode_is_query:
             embeddings: Union[Tensor, dict[str, Tensor]] = model.encode_query(qry=batch, **encoding_kwargs)
         else:
@@ -506,73 +262,29 @@ def call_batch_encode(model: EncoderModel | HybridModel, batch: dict | BatchEnco
 
     return embeddings
 
-def _rpc_encode(batch: dict | BatchEncoding, encode_is_query: bool, encoding_kwargs: dict):
-    """
-    Encode warpper function used by each `worker`
-    This function is executed on workers.
-    """
-    # Global registry (global environment variable) seems to be the only way 
-    # we can get the pointer of model during remote rpc execution.
-    assert isinstance(batch, (dict, BatchEncoding))
-    assert isinstance(encode_is_query, bool)
-    assert isinstance(encoding_kwargs, dict)
-
-    global MODEL_REGISTRY
-    model = MODEL_REGISTRY['worker'].model
-    return call_batch_encode(model, batch, encode_is_query, encoding_kwargs)
-
-def _cuda_empty_cache():
-    if local_rank := os.getenv("LOCAL_RANK", None):
-        with torch.cuda.device(f'cuda:{local_rank}'):
-            torch.cuda.empty_cache()
-    else:
-        torch.cuda.empty_cache()
-
-
-# === EmbeddingBag Related ===
-def _rpc_set_embedding_bag(emb_bag: torch.nn.EmbeddingBag, emb_bag_prompt: Optional[str]):
-    global MODEL_REGISTRY
-    model = MODEL_REGISTRY['worker'].model
-
-    model.emb_bag = emb_bag
-    model.emb_bag.to(model.lm_q.device)
-    model.emb_bag_prompt = emb_bag_prompt
-
-def _rpc_lm_q_encode_last_pooling_parallel(batch: dict | BatchEncoding):
-    """ Encode with lm_q, then pooling its hidden states at the last position """
-    global MODEL_REGISTRY
-    lm_q = MODEL_REGISTRY['worker'].model.lm_q_base_unwrap
-
-    # Forward model
-    with torch.no_grad(), torch.autocast("cuda"):
-        batch = move_to_cuda(batch, device=lm_q.device)
-        lm_out: BaseModelOutput = lm_q(
-            **batch,
-            return_dict=True,
-            use_cache=False,    # Do not return `past_key_values`
-            output_hidden_states=False
-        )
-    
-    # Fetch eos embedding
-    output_eos_embedding = lm_out.last_hidden_state[:, -1].cpu()
-    return output_eos_embedding
-
 
 # === DataCollator ===
 @dataclass
 class EncodeCollator:
     tokenizer: PreTrainedTokenizerBase
-    padding: Union[bool, str, PaddingStrategy] = True
+    encode_is_query: bool
+    q_max_len: int = 512
+    p_max_len: int = 512
+    pad_to_max_length: bool = False
+    padding: bool = True
     truncation: str = 'only_first'
-    max_length: Optional[int] = None
     return_tensors: str = "pt"
-    emb_size: Optional[int] = None      # Used to create bow / bce label
-    word_tokenizer = ICUWordPreTokenizer(STOPWORD_SETS)
-    sparse_remove_stopwords: bool = False
-    use_icu_word_pretokenizer: bool = False
+    
+    # LightRetriever's Dense: Non-contextual query embedding
     noncontextual_query_embedding: bool = False
     noncontextual_prompt_prefix: Optional[str] = None   # Optional string to prepend in front of each prompts.
-    token_id_vector_type: str = "bow"
+
+    # LightRetriever's Sparse: Term-based sparse reps
+    token_id_vector_type: str = "sum"
+    use_icu_word_pretokenizer: bool = False
+    sparse_remove_stopwords: bool = False
+    word_tokenizer: Optional[ICUWordPreTokenizer] = None
+    emb_size: Optional[int] = None      # Used to create bow / bce label
     
     def _get_text(
         self, 
@@ -618,10 +330,12 @@ class EncodeCollator:
         texts: list[dict[str, str]]
     ) -> dict[str, Tensor | list]:
         batch_size = len(texts)
+        max_length = self.q_max_len if self.encode_is_query else self.p_max_len
+
         texts_merged = self.format_texts(texts, prepend_prompt=True)
         encoded = dict(self.tokenizer(
             texts_merged,
-            max_length=self.max_length,
+            max_length=max_length,
             truncation=self.truncation,
             padding=self.padding,
             add_special_tokens=True,
@@ -630,7 +344,7 @@ class EncodeCollator:
             return_tensors=self.return_tensors,
         ))
 
-        if self.noncontextual_query_embedding:
+        if self.noncontextual_query_embedding and self.encode_is_query:
             # [TODO: Concated Impl] Generate (Prompted) token chunks
             # q_nonctx_tok_emb_tokenized = tokenize_nonctx_qry_tok_emb(
             #     queries=self.format_texts(texts),
@@ -649,13 +363,16 @@ class EncodeCollator:
             q_nonctx_tok_emb_tokenized = tokenize_nonctx_qry_emb_bag(
                 queries=self.format_texts(texts),
                 tokenizer=self.tokenizer,
-                max_len=self.max_length,
+                max_len=max_length,
             )
             encoded["nonctx_tok_emb_input_ids"] = q_nonctx_tok_emb_tokenized["input_ids"]
             encoded["nonctx_tok_emb_offsets"] = q_nonctx_tok_emb_tokenized["offsets"]
 
         # ** Sparse Pooling **
         if self.use_icu_word_pretokenizer:
+            if self.word_tokenizer is None:
+                self.word_tokenizer = get_icu_word_pretokenizer()
+            
             word_lists = self.word_tokenizer(self.format_texts(texts), remove_stopwords=self.sparse_remove_stopwords)
             token_ids: list[list[int]] = self.tokenizer(
                 word_lists, 
@@ -666,7 +383,7 @@ class EncodeCollator:
             texts_neat = self.format_texts(texts, prepend_whitespace=True)
             token_ids: list[list[int]] = self.tokenizer(
                 texts_neat, 
-                max_length=self.max_length,
+                max_length=max_length,
                 truncation=self.truncation,
                 add_special_tokens=False
             )['input_ids']

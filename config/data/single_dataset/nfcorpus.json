@@ -1,0 +1,15 @@
+{
+    "domain_ids": {
+        "nfcorpus": 0
+    },
+    "domain_weights": {
+        "nfcorpus": 1.0
+    },
+    "size": {
+        "nfcorpus": 2585
+    },
+    "epoch": {
+        "nfcorpus": 1.0
+    },
+    "ref_length": 2585
+}

@@ -294,7 +294,7 @@ def construct_embedding_bag(
             input_tensor[:curr_bs, -2] = torch.arange(start_idx, end_idx, dtype=torch.long, device=model.device)
 
             # Forward model
-            with torch.no_grad(), torch.autocast("cuda"):
+            with torch.no_grad(), torch.autocast(device_type=model.device.type):
                 lm_out: BaseModelOutput = model(
                     input_ids=input_tensor[:curr_bs],
                     return_dict=True,

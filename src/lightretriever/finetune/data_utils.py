@@ -27,7 +27,7 @@ from sparse_emb_util import ICUWordPreTokenizer
 from .arguments import DataArguments
 from .nonctx_emb_utils import tokenize_nonctx_qry_tok_emb
 from ..trainer import ContrastiveTrainer
-from ..utils.data_utils import read_corpus, build_corpus_idx_to_row, STOPWORD_SETS
+from ..utils.data_utils import read_corpus, build_corpus_idx_to_row, get_icu_word_pretokenizer
 
 import logging
 logger = logging.getLogger(__name__)
@@ -42,13 +42,20 @@ class TrainCollator(DataCollatorWithPadding):
     p_max_len: int = 512
     # separator: str = getattr(self.tokenizer, "sep_token", ' ')  # [SEP]
     separator: str = " "        # WhiteSpace
-    emb_size: Optional[int] = None      # Used to create bow / bce label
-    word_tokenizer = ICUWordPreTokenizer(STOPWORD_SETS)   # ICU Word Tokenizer
-    sparse_remove_stopwords: bool = False
-    use_icu_word_pretokenizer: bool = False
+
+
+    # LightRetriever's Dense: Non-contextual query embedding
     noncontextual_query_embedding: bool = False
     noncontextual_prompt_prefix: Optional[str] = None   # Optional string to prepend in front of each prompts.
-    token_id_vector_type: str = "bow"
+
+    # LightRetriever's Sparse: Term-based sparse reps
+    token_id_vector_type: str = "sum"
+    use_icu_word_pretokenizer: bool = False
+    sparse_remove_stopwords: bool = False
+    word_tokenizer: Optional[ICUWordPreTokenizer] = None   # ICU Word Tokenizer
+    emb_size: Optional[int] = None      # Used to create bow / bce label
+    
+    use_nested_tensor: bool = False 
     gpt_is_casual: bool = True
     
     def _get_query(self, item: dict[str, str], prepend_prompt=True, prepend_whitespace=False) -> str:
@@ -213,15 +220,17 @@ class TrainCollator(DataCollatorWithPadding):
         
         # Sample CE Scores for Distillation
         # Note: Some datasets (e.g. synthetic.parquet) may not contain ce scores
-        #       We should set its `ce_score` to `np.NINF`.
-        #       Here we does not process ce_scores if it's set to np.NINF.
+        #       We should set its `ce_score` to `np.NINF` / `np.NAN` if it's not available.
+        #       And do not process ce_scores if it's `np.NINF` / `np.NAN`.
         if "ce_score" in features[0]["positive_passages"][0] and \
-           (not np.isneginf(features[0]["positive_passages"][0]["ce_score"])):
+            features[0]["positive_passages"][0]["ce_score"] is not None and \
+           (not np.isneginf(float(features[0]["positive_passages"][0]["ce_score"]))) and \
+            (not np.isnan(float(features[0]["positive_passages"][0]["ce_score"]))):
             ce_scores: list[float] = []
             for item in features:
-                ce_scores.append(item["positive_passages"][0]["ce_score"])
+                ce_scores.append(float(item["positive_passages"][0]["ce_score"]))
                 for _neg in item["negative_passages"]:
-                    ce_scores.append(_neg["ce_score"])
+                    ce_scores.append(float(_neg["ce_score"]))
             processed["ce_scores"] = torch.tensor(ce_scores, dtype=torch.float32)
 
         if "domain_ids" in features[0]:
@@ -250,6 +259,9 @@ class TrainCollator(DataCollatorWithPadding):
         p_text_neat: list[str] = sum(map(partial(self._get_passages, prepend_prompt=False, prepend_whitespace=True), features), [])
 
         if self.use_icu_word_pretokenizer:
+            if self.word_tokenizer is None:
+                self.word_tokenizer = get_icu_word_pretokenizer()
+            
             ## Pretokenize via ICU Tokenizer
             q_pretokenized = self.word_tokenizer(q_text_neat, remove_stopwords=self.sparse_remove_stopwords)
             p_pretokenized = self.word_tokenizer(p_text_neat, remove_stopwords=self.sparse_remove_stopwords)

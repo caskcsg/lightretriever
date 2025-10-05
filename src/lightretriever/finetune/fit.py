@@ -10,6 +10,8 @@ Training scripts.
 import os
 import sys
 
+import torch.distributed as dist
+
 import transformers
 from transformers import (
     HfArgumentParser,
@@ -132,7 +134,7 @@ def main():
             seed=training_args.seed,
             shuffle=True,
             homogenous_batch=data_args.homogenous_batch,
-            global_batch_size=training_args.per_device_train_batch_size * training_args.world_size,
+            batch_size=training_args.per_device_train_batch_size,
         )
         dev_set = None
 
@@ -232,15 +234,16 @@ def main():
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
         trainer.save_model()  # Saves the tokenizer too for easy upload
 
-        if trainer.is_fsdp_enabled:
-            state_dict = trainer.accelerator.get_state_dict(trainer.model)
-            if trainer.accelerator.is_main_process:
-                trainer._save(training_args.output_dir, state_dict=state_dict)
     
     if training_args.do_eval:
         eval_results = trainer.evaluate()
         logger.info(f"Eval results: {eval_results}")
-
+    
+    if dist.is_initialized():
+        # Wait for all ranks to finish
+        dist.barrier(device_ids=[training_args.local_rank])
+        # Destroy process group
+        dist.destroy_process_group()
 
 def _mp_fn(index):
     # For xla_spawn (TPUs)

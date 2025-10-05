@@ -30,7 +30,7 @@ import datasets
 from transformers.tokenization_utils import PreTrainedTokenizerBase, BatchEncoding, PaddingStrategy
 
 from .arguments import InferenceArguments
-from .utils import move_to_cuda
+from .utils import move_to_device
 from ..rerank.modeling import CrossEncoder, CrossEncoderLogits
 
 _MODEL_CLS: dict[str, CrossEncoder | CrossEncoderLogits] = {
@@ -266,7 +266,7 @@ def call_batch_encode(model: CrossEncoder, batch: dict | BatchEncoding, encoding
     """ Call model encode with tokenized batch inputs, do necessary post-processings: 
         1. Reranked scores (logits): Move to cpu.
     """
-    batch = move_to_cuda(batch, device=model.lm.device)
+    batch = move_to_device(batch, device=model.lm.device)
     with torch.no_grad(), torch.autocast(device_type="cuda"), torch.cuda.device(model.lm.device):
         lm_out = model.forward(batch, **encoding_kwargs)
     return lm_out.logits.detach().squeeze().cpu()

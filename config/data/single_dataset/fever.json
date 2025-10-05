@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "fever": 0
+    },
+    "domain_weights": {
+        "fever": 1.0
+    },
+    "size": {
+        "fever": 109810
+    },
+    "epoch": {
+        "fever": 1.0
+    }
+}

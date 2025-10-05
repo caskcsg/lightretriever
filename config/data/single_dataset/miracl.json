@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "miracl": 0
+    },
+    "domain_weights": {
+        "miracl": 1.0
+    },
+    "size": {
+        "miracl": 32561
+    },
+    "epoch": {
+        "miracl": 1.0
+    }
+}

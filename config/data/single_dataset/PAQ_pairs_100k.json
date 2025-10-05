@@ -1,0 +1,15 @@
+{
+    "domain_ids": {
+        "PAQ_pairs_100k": 0
+    },
+    "domain_weights": {
+        "PAQ_pairs_100k": 1.0
+    },
+    "size": {
+        "PAQ_pairs_100k": 99999
+    },
+    "epoch": {
+        "PAQ_pairs_100k": 1.0
+    },
+    "ref_length": 99999
+}

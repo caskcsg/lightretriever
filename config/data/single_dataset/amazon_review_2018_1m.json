@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "amazon_review_2018_1m": 0
+    },
+    "domain_weights": {
+        "amazon_review_2018_1m": 1.0
+    },
+    "size": {
+        "amazon_review_2018_1m": 1000000
+    },
+    "epoch": {
+        "amazon_review_2018_1m": 1.0
+    }
+}

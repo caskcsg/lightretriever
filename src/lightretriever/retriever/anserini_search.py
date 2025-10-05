@@ -21,7 +21,8 @@ from typing import Optional
 import datasets
 
 # Set anserini jar path & java home before import jni
-os.environ['CLASSPATH'] = "PATH_TO/anserini-0.25.0-fatjar.jar"
+WORKSPACE_ROOT_PATH = str(Path(os.path.realpath(__file__)).parent.parent.parent.parent.absolute())
+os.environ['CLASSPATH'] = f"{WORKSPACE_ROOT_PATH}/anserini-0.25.0-fatjar.jar"
 
 from jnius import autoclass
 
@@ -36,6 +37,7 @@ class AnseriniSearch:
         self.convert_to_tensor = kwargs.get("convert_to_tensor", True)
 
         # ** Note: Default values below are Impact Search with Learned Sparse Retrieval Models **
+        self.anserini_threads = kwargs.get("threads", 64)
 
         ## Lang (Optional[String])
         self.anserini_lang = kwargs.get("anserini_lang", None)
@@ -56,12 +58,12 @@ class AnseriniSearch:
 
         # Set proper temp path on your own
         # Temps will be deleted by calling `.clear()`
-        anserini_temps_folder = Path("results/anserini_temps")
+        anserini_temps_folder = Path("/tmp/anserini_temps")
         anserini_temps_folder.mkdir(parents=True, exist_ok=True)
         self.temp_folder = Path(tempfile.mkdtemp(dir=str(anserini_temps_folder.absolute())))
 
         # Corpus dumping param
-        self.index_chunk_size = 40000
+        self.index_chunk_size = 2000
         self.n_dumped = 0   # How many corpus have been dumped
         self.is_submit_to_lucene = False    # Whether the dumped vectors are already submitted to lucene
     
@@ -90,7 +92,7 @@ class AnseriniSearch:
         encoded_corpus_folder = self.temp_folder / "encoded_corpus"
         encoded_corpus_folder.mkdir(parents=True, exist_ok=True)
 
-        f = open(encoded_corpus_folder / f"corpus{self.n_dumped // self.index_chunk_size :04d}.jsonl", "ab")
+        f = open(encoded_corpus_folder / f"corpus{self.n_dumped // self.index_chunk_size :05d}.jsonl", "ab")
         for id_, emb_ in tqdm(zip(corpus_ids, corpus_emb), desc=f"Dumping corpus to {encoded_corpus_folder.absolute()}"):
             if self.anserini_vector_type == "JsonVectorCollection":
                 line = dict(id=id_, content="", vector=emb_)
@@ -104,7 +106,7 @@ class AnseriniSearch:
             self.n_dumped += 1
             if self.n_dumped % self.index_chunk_size == 0:
                 f.close()
-                f = open(encoded_corpus_folder / f"corpus{self.n_dumped // self.index_chunk_size :04d}.jsonl", "ab")
+                f = open(encoded_corpus_folder / f"corpus{self.n_dumped // self.index_chunk_size :05d}.jsonl", "ab")
 
         f.close()
 
@@ -121,7 +123,7 @@ class AnseriniSearch:
             '-input', str(encoded_corpus_folder.absolute()), 
             '-index', str(self.index_folder.absolute()),
             '-generator', 'DefaultLuceneDocumentGenerator', 
-            '-threads', '64'
+            '-threads', str(self.anserini_threads)
         ]
 
         if self.anserini_lang:
@@ -160,12 +162,13 @@ class AnseriniSearch:
         
         results: dict[str, dict[str, float]] = dict()   # qid -> pid -> score
 
-        # Dump query tsv
-        encoded_query_path = self.temp_folder / "query.tsv"
-        with open(encoded_query_path, "w") as f:
+        # Dump query jsonl
+        encoded_query_path = self.temp_folder / "query.jsonl"
+        with open(encoded_query_path, "wb") as f:
             for id_, q_str_ in tqdm(zip(query_ids, query_emb), desc=f"Dumping queries to {encoded_query_path.absolute()}"):
-                line = id_ + '\t' + q_str_ + '\n'
-                f.write(line)
+                # Similar to anserini-anserini-0.25.0/src/main/java/io/anserini/search/topicreader/TsvStringTopicReader.java
+                # But choose JsonStringTopicReader instead, because query strings may contain '\n'
+                f.write(orjson.dumps({"id": id_, "title": q_str_}, option=orjson.OPT_APPEND_NEWLINE))
         
         # Retrieve
         ## Search Args
@@ -174,10 +177,10 @@ class AnseriniSearch:
         result_path = self.temp_folder / "result.trec"
         search_args = [
             '-hits', str(top_k),
-            '-parallelism', '64',
-            '-threads', '64',
+            '-parallelism', str(self.anserini_threads),
+            '-threads', str(self.anserini_threads),
             '-index', str(self.index_folder.absolute()),
-            '-topicReader', 'TsvString', 
+            '-topicReader', 'JsonString', 
             '-topics', str(encoded_query_path.absolute()),
             '-output', str(result_path.absolute()),
             '-format', 'trec',
@@ -248,7 +251,7 @@ class AnseriniSearch:
 
         logger.info("Sorting Corpus by document length (Longest first)...")
         if isinstance(corpus, dict):
-            corpus_ids = sorted(corpus, key=lambda k: len(corpus[k].get("text", "")), reverse=True)
+            corpus_ids = sorted(corpus, key=lambda k: len(corpus[k].get("text", "")) if isinstance(corpus[k], dict) else len(corpus[k]), reverse=True)
             corpus = [corpus[cid] for cid in corpus_ids]
         elif isinstance(corpus, datasets.Dataset):
             corpus = corpus.map(
@@ -275,7 +278,7 @@ class AnseriniSearch:
             corpus_end_idx = min(corpus_start_idx + self.corpus_chunk_size, len(corpus))
 
             # Step1: Encode chunk of corpus
-            if isinstance(corpus, dict):
+            if isinstance(corpus, list):
                 corpus_sliced = corpus[corpus_start_idx:corpus_end_idx]
             else:
                 corpus_sliced = corpus.select(range(corpus_start_idx, corpus_end_idx))
@@ -286,6 +289,12 @@ class AnseriniSearch:
                 show_progress_bar=self.show_progress_bar, 
                 convert_to_tensor=self.convert_to_tensor
             )
+            if isinstance(sub_corpus_embeddings, dict):
+                if "sparse_reps" in sub_corpus_embeddings:
+                    logger.warning(f"sub_corpus_embeddings uses `sparse_reps` by default. Available keys: {sub_corpus_embeddings.keys()}")
+                    sub_corpus_embeddings = sub_corpus_embeddings["sparse_reps"]
+                else:
+                    raise ValueError(f"HybridModel: Return Multi-vector with keys {sub_corpus_embeddings.keys()}, but not `sparse_reps`")
         
             # Step2: Indexing
             logger.info("Anserini Indexing...")

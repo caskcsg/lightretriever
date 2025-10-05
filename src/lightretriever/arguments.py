@@ -11,6 +11,7 @@ import json
 from typing import Optional
 from dataclasses import dataclass, field, asdict
 
+import torch
 from transformers import TrainingArguments
 
 import logging
@@ -307,6 +308,11 @@ class BaseModelArguments:
                     self.sep_token = "[/INST]"
                 elif "gemma" in self.model_name_or_path.lower():
                     self.sep_token = "<bos>"
+        
+        # Only enable liger_kernel on CUDA
+        if self.liger_kernel and not torch.cuda.is_available():
+            self.liger_kernel = False
+            logger.warning("Liger kernel is not supported on this device. It is disabled.")
     
     def __str__(self):
         self_as_dict = asdict(self)

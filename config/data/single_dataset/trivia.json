@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "trivia": 0
+    },
+    "domain_weights": {
+        "trivia": 1.0
+    },
+    "size": {
+        "trivia": 60380
+    },
+    "epoch": {
+        "trivia": 1.0
+    }
+}

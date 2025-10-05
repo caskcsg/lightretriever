@@ -12,16 +12,21 @@ import json
 import datetime
 from copy import deepcopy
 from collections import defaultdict
-from typing import Dict, List, Tuple, Optional, Any, Union
+from functools import partial
+from typing import Dict, List, Tuple, Optional, Any, Union, Callable
 
 import torch
 from torch import nn
+from torch.utils.data import DataLoader, Dataset
 from torch.nn.utils.parametrize import is_parametrized
 import torch.distributed as dist
+
+import datasets
 import transformers
 from transformers import get_scheduler, __version__
+from transformers.utils import is_datasets_available
 from transformers.trainer import Trainer
-from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, speed_metrics
+from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, speed_metrics, seed_worker
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.modeling_utils import unwrap_model
 from transformers.utils.import_utils import is_sagemaker_mp_enabled
@@ -85,6 +90,58 @@ class ContrastiveTrainer(Trainer):
                 min_reg_ratio=self.args.min_reg_ratio,
                 reg_type=self.args.reg_type,
             )
+    
+    def _get_dataloader(
+        self,
+        dataset: Dataset,
+        description: str,
+        batch_size: int,
+        sampler_fn: Optional[Callable[[Dataset], torch.utils.data.Sampler]] = None,
+        is_training: bool = False,
+        dataloader_key: Optional[str] = None,
+    ) -> DataLoader:
+        """ Copied from Trainer._get_dataloader, but always apply drop_last to dataloader,
+        to avoid the last batch with samples < batch_size.
+
+        Create a [`~torch.utils.data.DataLoader`] from the given dataset.
+        """
+
+        data_collator = self.data_collator
+        if is_datasets_available() and isinstance(dataset, datasets.Dataset):
+            dataset = self._remove_unused_columns(dataset, description=description)
+        else:
+            data_collator = self._get_collator_with_removed_columns(self.data_collator, description=description)
+
+        dataloader_params = {
+            "batch_size": batch_size,
+            "collate_fn": data_collator,
+            "num_workers": self.args.dataloader_num_workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+            "persistent_workers": self.args.dataloader_persistent_workers,
+            "drop_last": self.args.dataloader_drop_last,    # Essential to avoid all-gather hang!!!
+        }
+
+        if not isinstance(dataset, torch.utils.data.IterableDataset):
+            if sampler_fn is not None:
+                dataloader_params["sampler"] = sampler_fn(dataset)
+            # dataloader_params["drop_last"] = self.args.dataloader_drop_last
+            dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
+            if is_training:
+                dataloader_params["worker_init_fn"] = partial(
+                    seed_worker, num_workers=self.args.dataloader_num_workers, rank=self.args.process_index
+                )
+
+        dataloader = DataLoader(dataset, **dataloader_params)
+
+        # Accelerator.free_memory() will destroy the references, so
+        # we need to store the non-prepared version for eval dataloaders.
+        if dataloader_key is not None and self.args.dataloader_persistent_workers:
+            if hasattr(self, "_eval_dataloaders"):
+                self._eval_dataloaders[dataloader_key] = dataloader
+            else:
+                self._eval_dataloaders = {dataloader_key: dataloader}
+
+        return self.accelerator.prepare(dataloader)
 
     def prediction_step(
         self,
@@ -105,6 +162,12 @@ class ContrastiveTrainer(Trainer):
         return (loss, logits, labels)
 
     def _dist_gather_tensor(self, t: Optional[torch.Tensor]):
+        """ Gather tensor from all processes. 
+            Args:
+                t (Tensor): Tensor to be gathered.
+            Returns:
+                gathered_t (Tensor): Tensor gathered from all processes.
+        """
         if t is None:
             return None
         t = t.contiguous()
@@ -187,20 +250,6 @@ class ContrastiveTrainer(Trainer):
         # Good practice: save your training arguments together with the trained model
         torch.save(self.args, os.path.join(output_dir, "training_args.bin"))
     
-    def _save_checkpoint(self, model, trial):
-        super()._save_checkpoint(model=model, trial=trial)
-
-        # FSDP Saving Reference: https://huggingface.co/docs/accelerate/main/en/usage_guides/fsdp#state-dict
-        if self.is_fsdp_enabled:
-            checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
-            run_dir = self._get_output_dir(trial=trial)
-            output_dir = os.path.join(run_dir, checkpoint_folder)
-
-            state_dict = self.accelerator.get_state_dict(model)
-            if self.accelerator.is_main_process:
-                self._save(output_dir, state_dict=state_dict)
-            
-            dist.barrier()
 
     # Compatible with Transformers>=4.24.0
     def _load_from_checkpoint(self, resume_from_checkpoint: str, model: nn.Module=None):

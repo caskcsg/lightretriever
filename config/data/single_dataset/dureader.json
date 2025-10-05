@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "dureader": 0
+    },
+    "domain_weights": {
+        "dureader": 1.0
+    },
+    "size": {
+        "dureader": 86395
+    },
+    "epoch": {
+        "dureader": 1.0
+    }
+}

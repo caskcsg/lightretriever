@@ -8,8 +8,6 @@ dependencies = [
   "transformers>=4.47.0",
   "deepspeed>=0.14.1",
   "accelerate>=0.28.0",
-  "flash-attn>=2.5.6",
-  "liger-kernel>=0.5.2",
   "datasets>=2.18.0",
   "peft>=0.10.0",
   "fire>=0.6.0",
@@ -24,7 +22,6 @@ dependencies = [
   "sentence_transformers>=3.0.0",
   "mteb>=1.14.15",
   "sparse-emb-util>=0.2.0",
-  "GradCache@git+https://github.com/ma787639046/GradCache",
 ]
 requires-python = ">=3.11"
 authors = [
@@ -33,7 +30,7 @@ authors = [
 maintainers = [
   {name = "Guangyuan Ma", email = "Ma787639046@outlook.com"},
 ]
-description = "Code Releases of Research Paper - LightRetriever: A LLM-based Hybrid Retrieval Architecture with 1000× Faster Query Inference."
+description = "Code Releases of Research Paper - LightRetriever: A LLM-based Text Retrieval Architecture with Extremely Faster Query Inference"
 readme = "README.md"
 license = {file = "LICENSE"}
 keywords = ["LightRetriever", "SentenceTransformers", "LLM Embedding"]
@@ -43,6 +40,13 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+fused_kernel = [
+  "flash-attn>=2.5.6",
+  "liger-kernel>=0.5.2",
+]
+grad_cache = [
+  "GradCache@git+https://github.com/ma787639046/GradCache",
+]
 dataprocess = [
   "jieba>=0.42.1",
   "jionlp>=1.5.11",

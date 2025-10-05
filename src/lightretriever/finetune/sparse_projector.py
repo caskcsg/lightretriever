@@ -11,8 +11,8 @@ logger = logging.getLogger(__name__)
 
 class SparseProjectorBase(nn.Module):
     """ Base Class for all Sparse Rep Projectors """
-    CONFIG_NAME = 'spr_gate_mlp_config.json'
-    WEIGHT_NAME = 'spr_gate_mlp.pt'
+    CONFIG_NAME = 'sparse_projector_config.json'
+    WEIGHT_NAME = 'sparse_projector.pt'
 
     def __init__(self, hidden_dim: int, vocab_size: int, initializer_range: float=0.02):
         super().__init__()
@@ -47,30 +47,94 @@ class SparseProjectorBase(nn.Module):
         raise NotImplementedError("Base Class. Please implement this function in subclass.")
     
     @classmethod
-    def build(cls, hidden_dim: int, vocab_size: int, init_weight: Optional[Tensor]=None):
-        projector = cls(hidden_dim, vocab_size)
-        if init_weight is not None:
-            projector.linear.weight.data.copy_(init_weight)
+    def build(
+        cls, 
+        hidden_dim: int, 
+        vocab_size: int, 
+        initializer_range: float=0.02, 
+        model_dir: Optional[str]=None, 
+        init_weight: Optional[Tensor]=None,
+    ):
+        """ Build a SparseProjectorBase for training from scratch. 
+
+            Args:
+                hidden_dim (int): The input dimension of the projector.
+                vocab_size (int): The output dimension of the projector.
+                initializer_range (float, optional): The initializer range of the projector. Defaults to 0.02.
+                model_dir (Optional[str], optional): The model directory to load the projector from. Defaults to None.
+                init_weight (Optional[Tensor], optional): The initial weight of the projector. Defaults to None.
+            
+            Returns:
+                SparseProjectorBase: The built projector.
+            
+            Notes: Weights Init Priority:
+                1) Load from local if model_dir is not None and load successfully.
+                2) Use init_weight if it is not None.
+                3) Init from scratch if neither of the above works.
+        """
+        projector = None
+        if model_dir is not None:
+            try:
+                projector = cls.load(model_dir)
+                logger.info(f"Loaded projector from {model_dir}.")
+            except FileNotFoundError:
+                logger.warning(f"Projector not found in {model_dir}, fallback to init.")
+
+        if projector is None:
+            projector = cls(hidden_dim, vocab_size, initializer_range)
+            if init_weight is not None:
+                projector.linear.weight.data.copy_(init_weight)
+                logger.info("Initialized projector with init_weight.")
+            else:
+                logger.info("Initialized projector from scratch.")
+        
         return projector
 
     @classmethod
-    def load(cls, model_dir: str):
-        pooler_config_path = os.path.join(model_dir, cls.CONFIG_NAME)
-        if not os.path.exists(pooler_config_path):
-            raise FileNotFoundError(f"{cls.__name__} config {pooler_config_path} does not exists.")
-        with open(pooler_config_path, 'r') as f:
-            pooler_config: dict[str, any] = json.load(f)
-        
-        pooler = cls(pooler_config['input_dim'], pooler_config['output_dim'])
+    def load(
+        cls, 
+        model_dir: str
+    ):
+        """ Load a SparseProjectorBase from a model directory. 
 
-        pooler_path = os.path.join(model_dir, cls.WEIGHT_NAME)
-        if os.path.exists(pooler_path):
-            logger.info(f'Loading {cls.__name__} from {pooler_path}')
-            state_dict = torch.load(pooler_path, map_location='cpu', weights_only=True)
-            pooler.load_state_dict(state_dict)
-        return pooler
+            Args:
+                model_dir (Optional[str]): The model directory to load the projector from.
+            
+            Returns:
+                SparseProjectorBase: The loaded projector.
+        """
+        if model_dir is None:
+            raise FileNotFoundError(f"model_dir is None.")
+        
+        projector_config_path = os.path.join(model_dir, cls.CONFIG_NAME)
+        if not os.path.exists(projector_config_path):
+            raise FileNotFoundError(f"{cls.__name__} config {projector_config_path} does not exists.")
+    
+        with open(projector_config_path, 'r') as f:
+            projector_config: dict[str, any] = json.load(f)
+        
+        projector = cls(
+            projector_config['input_dim'], 
+            projector_config['output_dim'], 
+            projector_config['initializer_range']
+        )
+
+        projector_path = os.path.join(model_dir, cls.WEIGHT_NAME)
+        if os.path.exists(projector_path):
+            logger.info(f'Loading {cls.__name__} from {projector_path}')
+            state_dict = torch.load(projector_path, map_location='cpu', weights_only=True)
+            projector.load_state_dict(state_dict)
+        
+        return projector
 
     def save_pooler(self, save_path: str, state_dict: dict[str, Tensor]=None):
+        """ Save the projector to a model directory. 
+
+            Args:
+                save_path (str): Path to save the projector.
+        """
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
         if not state_dict:
             state_dict = self.state_dict()
         torch.save(state_dict, os.path.join(save_path, self.WEIGHT_NAME))
@@ -80,9 +144,6 @@ class SparseProjectorBase(nn.Module):
 
 class SparseLinearProjector(SparseProjectorBase):
     """ SparseLinearProjector project a hidden state to vocab dimension with only a linear layer """
-    CONFIG_NAME = 'linear_projector_config.json'
-    WEIGHT_NAME = 'linear_projector.pt'
-
     @property
     def name(self):
         return "SparseLinearProjector"
@@ -179,10 +240,30 @@ class SparseDownProjector(nn.Module):
         return sparse_embedding
     
     @classmethod
-    def build(cls, vocab_size: int, hidden_dim: int, output_dim: int=1, init_weight: Optional[Tensor]=None):
-        projector = cls(vocab_size=vocab_size, hidden_dim=hidden_dim, output_dim=output_dim)
-        if init_weight is not None:
-            projector.linear.weight.data.copy_(init_weight)
+    def build(
+        cls, 
+        vocab_size: int, 
+        hidden_dim: int, 
+        output_dim: int=1, 
+        initializer_range: float=0.02,
+        model_dir: Optional[str]=None, 
+        init_weight: Optional[Tensor]=None,
+    ):
+        projector = None
+        if model_dir is not None:
+            try:
+                projector = cls.load(model_dir)
+                logger.info(f"Loaded projector from {model_dir}.")
+            except FileNotFoundError:
+                logger.warning(f"Projector not found in {model_dir}, fallback to init.")
+
+        if projector is None:
+            projector = cls(vocab_size=vocab_size, hidden_dim=hidden_dim, output_dim=output_dim, initializer_range=initializer_range)
+            if init_weight is not None:
+                projector.linear.weight.data.copy_(init_weight)
+                logger.info("Initialized projector with init_weight.")
+            else:
+                logger.info("Initialized projector from scratch.")
         return projector
     
     @classmethod
@@ -209,6 +290,8 @@ class SparseDownProjector(nn.Module):
         return pooler
     
     def save_pooler(self, save_path: str, state_dict: dict[str, Tensor]=None):
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
         if not state_dict:
             state_dict = self.state_dict()
         
@@ -218,6 +301,6 @@ class SparseDownProjector(nn.Module):
             if 'linear.' in k:
                 parsed_state_dict[k[pfx_len:]] = v
         
-        torch.save(state_dict, os.path.join(save_path, self.WEIGHT_NAME))
+        torch.save(parsed_state_dict, os.path.join(save_path, self.WEIGHT_NAME))
         with open(os.path.join(save_path, self.CONFIG_NAME), 'w') as f:
             json.dump(self._config, f)

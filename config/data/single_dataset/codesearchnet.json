@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "codesearchnet": 0
+    },
+    "domain_weights": {
+        "codesearchnet": 1.0
+    },
+    "size": {
+        "codesearchnet": 1375067
+    },
+    "epoch": {
+        "codesearchnet": 1.0
+    }
+}

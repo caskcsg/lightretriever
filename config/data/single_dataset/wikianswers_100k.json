@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "WikiAnswers_100k": 0
+    },
+    "domain_weights": {
+        "WikiAnswers_100k": 1.0
+    },
+    "size": {
+        "WikiAnswers_100k": 100000
+    },
+    "epoch": {
+        "WikiAnswers_100k": 1.0
+    }
+}

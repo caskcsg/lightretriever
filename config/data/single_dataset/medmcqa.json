@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "medmcqa": 0
+    },
+    "domain_weights": {
+        "medmcqa": 1.0
+    },
+    "size": {
+        "medmcqa": 160869
+    },
+    "epoch": {
+        "medmcqa": 1.0
+    }
+}

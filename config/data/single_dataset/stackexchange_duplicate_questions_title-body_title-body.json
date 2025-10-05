@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "stackexchange_duplicate_questions_title-body_title-body": 0
+    },
+    "domain_weights": {
+        "stackexchange_duplicate_questions_title-body_title-body": 1.0
+    },
+    "size": {
+        "stackexchange_duplicate_questions_title-body_title-body": 250519
+    },
+    "epoch": {
+        "stackexchange_duplicate_questions_title-body_title-body": 1.0
+    }
+}

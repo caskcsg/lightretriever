@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "nq": 0
+    },
+    "domain_weights": {
+        "nq": 1.0
+    },
+    "size": {
+        "nq": 58812
+    },
+    "epoch": {
+        "nq": 1.0
+    }
+}

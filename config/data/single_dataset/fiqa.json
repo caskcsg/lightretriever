@@ -1,0 +1,15 @@
+{
+    "domain_ids": {
+        "fiqa": 0
+    },
+    "domain_weights": {
+        "fiqa": 1.0
+    },
+    "size": {
+        "fiqa": 5498
+    },
+    "epoch": {
+        "fiqa": 1.0
+    },
+    "ref_length": 5498
+}

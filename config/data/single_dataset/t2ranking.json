@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "t2ranking": 0
+    },
+    "domain_weights": {
+        "t2ranking": 1.0
+    },
+    "size": {
+        "t2ranking": 200376
+    },
+    "epoch": {
+        "t2ranking": 1.0
+    }
+}

@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "squad_pairs": 0
+    },
+    "domain_weights": {
+        "squad_pairs": 1.0
+    },
+    "size": {
+        "squad_pairs": 87599
+    },
+    "epoch": {
+        "squad_pairs": 1.0
+    }
+}

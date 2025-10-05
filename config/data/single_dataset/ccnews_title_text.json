@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "ccnews_title_text": 0
+    },
+    "domain_weights": {
+        "ccnews_title_text": 1.0
+    },
+    "size": {
+        "ccnews_title_text": 614664
+    },
+    "epoch": {
+        "ccnews_title_text": 1.0
+    }
+}

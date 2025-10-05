@@ -1,0 +1,15 @@
+{
+    "domain_ids": {
+        "synthetic": 0
+    },
+    "domain_weights": {
+        "synthetic": 1.0
+    },
+    "size": {
+        "synthetic": 224791
+    },
+    "epoch": {
+        "synthetic": 1.0
+    },
+    "ref_length": 224791
+}

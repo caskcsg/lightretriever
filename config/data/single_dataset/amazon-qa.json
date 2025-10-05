@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "amazon-qa": 0
+    },
+    "domain_weights": {
+        "amazon-qa": 1.0
+    },
+    "size": {
+        "amazon-qa": 1095290
+    },
+    "epoch": {
+        "amazon-qa": 1.0
+    }
+}

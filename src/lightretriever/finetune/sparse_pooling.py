@@ -20,7 +20,7 @@ from ..utils.max_linear_map import max_linear_mapping
 # ========
 # Prompt Mask: Remove Prompt Area from attention mask
 # ========
-def get_sparse_attention_mask(input_ids: Tensor, attention_mask: Tensor, sep_token_id: int):
+def get_sparse_attention_mask(input_ids: Tensor, attention_mask: Tensor, sep_token_id: int, remove_prompt: bool = False):
     """ Remove Prompt, first, last token from attention_mask """
     # 1. Mask logits of following position along sequence length dimension:
     #     first (e.g. [CLS], <bos>)
@@ -28,9 +28,10 @@ def get_sparse_attention_mask(input_ids: Tensor, attention_mask: Tensor, sep_tok
     #     pad token (e.g. [PAD])   (~attention_mask)
     mask = attention_mask.bool()
 
-    # Prompt mask
-    prompt_mask = get_prompt_mask(input_ids, sep_token_id)
-    mask = mask.masked_fill(prompt_mask, False)
+    if remove_prompt:
+        # Prompt mask
+        prompt_mask = get_prompt_mask(input_ids, sep_token_id)
+        mask = mask.masked_fill(prompt_mask, False)
 
     bs_indices = torch.arange(attention_mask.shape[0], device=attention_mask.device)
     last_token_indices = attention_mask.sum(dim=1) - 1
@@ -275,10 +276,4 @@ def aggregate(
         logits = torch.mean(logits, dim=1)
 
     return logits
-
-
-# ========
-# Sparse Converter Mixin: Base Class for converting PyTorch/Numpy array to json/string reps.
-# ========
-
 

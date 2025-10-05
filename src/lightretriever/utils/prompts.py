@@ -1,3 +1,4 @@
+from typing import Optional
 from random import Random
 
 INSTS = {
@@ -206,7 +207,7 @@ INSTS = {
 def get_prompt(
     prompt_type: str, 
     task_name: str, 
-    rng: Random
+    rng: Optional[Random] = None,
 ) -> str:
     """ Add prompt for query of QA/Retrieval/Rerank tasks. 
         [TODO: Remove this line] Also add prompt on both side for Symmetrical tasks (e.g. NLI) 
@@ -214,6 +215,9 @@ def get_prompt(
         1. For Retrieval tasks, NO passage prompt is used.
         2. For Reranking tasks, a prompt of `\nPassage: ` is always added in front of passage text.
     """
+    if rng is None:
+        rng = Random(42)
+    
     if prompt_type in ['e5', 'e5_reranker']:
         instruct_list: list[str] = INSTS[prompt_type][task_name]
         instruct: str = instruct_list[0] if len(instruct_list) == 1 else rng.choice(instruct_list)

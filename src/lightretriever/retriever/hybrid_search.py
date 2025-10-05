@@ -7,6 +7,7 @@ Hybrid search based on Faiss (dense) and Tantivy (sparse)
 @Author  :   Ma (Ma787639046@outlook.com)
 '''
 
+import time
 import heapq
 import logging
 import numpy as np
@@ -31,6 +32,7 @@ class HybridSearch:
         faiss_search_map: str = "flat",
         sparse_search_map: str = "anserini",
         score_fuse_method: str = "linear",  # Choose among ['linear', 'rrf']
+        fuse_weights: list[float] = [0.7, 0.3],     # Weights to fuse two scores
         return_all_results: bool = False,      # Return dict results of hybrid retrieval, containing single results
         **kwargs,
     ):
@@ -40,6 +42,7 @@ class HybridSearch:
         self.show_progress_bar = kwargs.get("show_progress_bar", True)
         self.convert_to_tensor = kwargs.get("convert_to_tensor", True)
         self.score_fuse_method = score_fuse_method
+        self.fuse_weights = fuse_weights
         self.return_all_results = return_all_results
         
         # ** Dense Index **
@@ -145,47 +148,36 @@ class HybridSearch:
         assert isinstance(query_emb, dict) and (use_dense_retrieval or use_sparse_retrieval or use_emb_retrieval or use_token_id_retrieval)
         assert dense or sparse, "Please indicate retrieval embedding types."
 
-        if self.return_all_results:
-            results = {"return_all_results": True}
-        else:
-            results = {}
+        results = {}
 
         if dense:
             if use_dense_retrieval:
                 dense_results = self.dense_search.retrieve_with_emb(query_emb["dense_reps"], query_ids, top_k=top_k)
                 results["den"] = dense_results
-                results["default"] = dense_results  # Backward compatiable, output one result as main results
             
             if use_emb_retrieval:
                 emb_results = self.dense_search.retrieve_with_emb(query_emb["emb_reps"], query_ids, top_k=top_k)
                 results["emb"] = emb_results
-                results["default"] = emb_results  # Backward compatiable, output one result as main results
         
         if sparse:
             if use_token_id_retrieval:
                 imbalanced_sparse_results = self.sparse_search.retrieve_with_emb(query_emb["token_id_reps"], query_ids, top_k=top_k)
                 results["tok"] = imbalanced_sparse_results
-                results["default"] = imbalanced_sparse_results  # Backward compatiable, output one result as main results
             
             if use_sparse_retrieval:
                 sparse_results = self.sparse_search.retrieve_with_emb(query_emb["sparse_reps"], query_ids, top_k=top_k)
                 results["spr"] = sparse_results
-                results["default"] = sparse_results  # Backward compatiable, output one result as main results
             
             if use_dense_retrieval and use_sparse_retrieval:
-                dense_sparse_results = self._fuse_results(dense_results, sparse_results)
+                dense_sparse_results = self._fuse_results(dense_results, sparse_results, weights=self.fuse_weights)
                 results["den_spr"] = dense_sparse_results
-                results["default"] = results["den_spr"]  # Backward compatiable, output one result as main results
             
             if use_emb_retrieval and use_token_id_retrieval:
-                imb_embspr_results = self._fuse_results(emb_results, imbalanced_sparse_results)
+                imb_embspr_results = self._fuse_results(emb_results, imbalanced_sparse_results, weights=self.fuse_weights)
                 results["emb_tok"] = imb_embspr_results
                 results["default"] = results["emb_tok"]  # Backward compatiable, output one result as main results
         
-        if self.return_all_results:
-            return results
-        else:
-            return results["default"]  # Backward compatiable, output one result as main results
+        return results
     
     def _add_to_heap(
         self, 
@@ -212,7 +204,7 @@ class HybridSearch:
         
         return result_heaps
     
-    def _fuse_results(self, dense_results=None, sparse_results=None):
+    def _fuse_results(self, dense_results=None, sparse_results=None, weights: list[int] = [0.7, 0.3]):
         # Step5: Rank fusion
         # Note: There are multiple rank fusion methods:
         # 1) Reciprocal Rank Fusion (RRF): Fusing merely based on ranks
@@ -231,7 +223,7 @@ class HybridSearch:
             if self.score_fuse_method == "rrf":
                 results = fuse_scores_rrf([dense_results, sparse_results])
             elif self.score_fuse_method == "linear":
-                results = fuse_scores_linear([dense_results, sparse_results])
+                results = fuse_scores_linear([dense_results, sparse_results], weights=weights)
             else:
                 raise NotImplementedError(f"score_fuse_method {self.score_fuse_method} is not supported.")
         else:
@@ -280,7 +272,7 @@ class HybridSearch:
 
         logger.info("Sorting Corpus by document length (Longest first)...")
         if isinstance(corpus, dict):
-            corpus_ids = sorted(corpus, key=lambda k: len(corpus[k].get("text", "")), reverse=True)
+            corpus_ids = sorted(corpus, key=lambda k: len(corpus[k].get("text", "")) if isinstance(corpus[k], dict) else len(corpus[k]), reverse=True)
             corpus = [corpus[cid] for cid in corpus_ids]
         elif isinstance(corpus, datasets.Dataset):
             corpus = corpus.map(
@@ -321,7 +313,7 @@ class HybridSearch:
             corpus_end_idx = min(corpus_start_idx + self.corpus_chunk_size, len(corpus))
 
             # Step1: Encode chunk of corpus
-            if isinstance(corpus, dict):
+            if isinstance(corpus, list):
                 corpus_sliced = corpus[corpus_start_idx:corpus_end_idx]
             else:
                 corpus_sliced = corpus.select(range(corpus_start_idx, corpus_end_idx))
@@ -377,37 +369,38 @@ class HybridSearch:
             sparse_results = self.sparse_search.retrieve_with_emb(query_emb=query_embeddings["sparse_reps"], query_ids=query_ids, top_k=top_k)
         
         if use_dense_retrieval and use_sparse_retrieval:
-            dense_sparse_results = self._fuse_results(dense_results, sparse_results)
+            dense_sparse_results = self._fuse_results(dense_results, sparse_results, weights=self.fuse_weights)
         
         if use_emb_retrieval and use_token_id_retrieval:
-            emb_tok_id_results = self._fuse_results(emb_results, imbalanced_sparse_results)
+            emb_tok_id_results = self._fuse_results(emb_results, imbalanced_sparse_results, weights=self.fuse_weights)
         
         self._clear()   # Remember to clear all index
         
-        results = {"return_all_results": True}
+        # Note:
+        # MTEB does not support return multiple emb results at once
+        # If we are evaluating MTEB, please set return_all_results=False to only return the default results.
+        results = {}
+        default_results = None
         if use_dense_retrieval:
             results["den"] = dense_results
-            results["default"] = dense_results  # Backward compatiable, output one result as main results
+            default_results = dense_results
         if use_sparse_retrieval:
             results["spr"] = sparse_results
-            results["default"] = sparse_results  # Backward compatiable, output one result as main results
+            default_results = sparse_results
         if use_emb_retrieval:
             results["emb"] = emb_results
-            results["default"] = emb_results  # Backward compatiable, output one result as main results
+            default_results = emb_results
         if use_token_id_retrieval:
             results["tok"] = imbalanced_sparse_results
-            results["default"] = imbalanced_sparse_results  # Backward compatiable, output one result as main results
+            default_results = imbalanced_sparse_results
         if use_dense_retrieval and use_sparse_retrieval:
             results["den_spr"] = dense_sparse_results
-            results["default"] = dense_sparse_results  # Backward compatiable, output one result as main results
+            default_results = dense_sparse_results
         if use_emb_retrieval and use_token_id_retrieval:
             results["emb_tok"] = emb_tok_id_results
-            results["default"] = emb_tok_id_results  # Backward compatiable, output one result as main results
+            default_results = emb_tok_id_results
         
-        if self.return_all_results:
-            return results
-        else:
-            return results["default"]
+        return results if self.return_all_results else default_results
 
 def human_readable_size(size_bytes: int) -> str:
     """ Parse a number in Bytes to human readable string format """

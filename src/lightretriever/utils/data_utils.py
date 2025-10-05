@@ -16,14 +16,14 @@ from datasets import (
 from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase, PreTrainedTokenizerFast
 
 from .homogenous_iterable_dataset import interleave_datasets_homologenous
-from .prompts import get_prompt_list
+from .prompts import get_prompt, get_prompt_list
 from .stopwords.util import get_lucene_stopword_list, get_unicode_punctuation_list
+
+from sparse_emb_util import ICUWordPreTokenizer
 
 import logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO if (int(os.getenv("RANK", -1)) in [0, -1]) else logging.WARN)
-
-STOPWORD_SETS = set(get_lucene_stopword_list() + get_unicode_punctuation_list())
 
 # Tokenizer
 def load_tokenizer(
@@ -280,6 +280,18 @@ def resize_emb(model: PreTrainedModel, tokenizer: PreTrainedTokenizerBase, pad_t
     if model.get_input_embeddings().weight.shape[0] < len(tokenizer):
         model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=pad_to_multiple_of)
 
+def get_icu_word_pretokenizer():
+    """ get ICUWordPreTokenizer.
+    `ICUWordPreTokenizer` cuts the word boundary with [ICU4X](https://github.com/unicode-org/icu4x) 
+    International Components for Unicode. It supports cutting any language, backed by a LSTM model
+    and the dictionary model for Chinese and Japanese. It will return the words list without whitespaces.
+    
+    Returns:
+        ICUWordPreTokenizer: The ICUWordPreTokenizer object.
+    """
+    STOPWORD_SETS = set(get_lucene_stopword_list() + get_unicode_punctuation_list())
+    return ICUWordPreTokenizer(STOPWORD_SETS)
+
 def wc_count(file_name):
     import subprocess
     out = subprocess.getoutput("wc -l %s" % file_name)
@@ -370,6 +382,7 @@ def load_domain_datasets(
         domain_names: List[str],
         preprocessed_dir: Union[str, Path],
         prompt_type: str,
+        streaming: bool = False,
         add_domain_id: bool = False,
         add_domain_name: bool = False,
         seed: int = 42,
@@ -380,6 +393,8 @@ def load_domain_datasets(
     Load multiple HF dataset by `domain_names` from root dir `preprocessed_dir`
      - `domain_names`: List of each domain names.
      - `preprocessed_dir`: Root folder path of all processed domains.
+     - `prompt_type`: Type of prompt.
+     - `streaming`: Load datasets in streaming mode.
      - `add_domain_id`: Add domain index.
      - `add_domain_name`: Add domain name.
      - `domain_to_idx`: A dict that map the domain names to coresponding index
@@ -410,12 +425,20 @@ def load_domain_datasets(
         else:
             raise FileNotFoundError(f"{domain_name} does not exists or is not a file. Please check data config.")
 
-        dataset = load_dataset(load_format, data_files=domain_filepaths, split="train")
+        dataset = load_dataset(load_format, data_files=domain_filepaths, streaming=streaming, split="train")
 
         if "instruction" not in dataset.column_names:
             # Add pre-defined prompt column (In `prompts.py`)
-            instruction_list = get_prompt_list(prompt_type, domain_name, num=len(dataset), seed=seed)
-            dataset = dataset.add_column(name="instruction", column=instruction_list)
+            if isinstance(dataset, datasets.Dataset):
+                instruction_list = get_prompt_list(prompt_type, domain_name, num=len(dataset), seed=seed)
+                dataset = dataset.add_column(name="instruction", column=instruction_list)
+            elif isinstance(dataset, datasets.IterableDataset):
+                instruction = get_prompt(prompt_type, domain_name)
+                dataset = dataset.map(
+                    lambda item, instruction=instruction: {"instruction": instruction}
+                )
+            else:
+                raise TypeError(f"Dataset type {type(dataset)} is not supported.")
         else:
             if prompt_type == "e5":     # E5 prompt needs post process the format
                 dataset = dataset.map(
@@ -423,10 +446,17 @@ def load_domain_datasets(
                 )
 
         # Add `_train_dataset_idx` to support reproducable negative passage sampling
-        dataset = dataset.add_column(name="_train_dataset_idx", column=np.arange(len(dataset)))
+        # dataset = dataset.add_column(name="_train_dataset_idx", column=np.arange(len(dataset)))
 
         if add_domain_name:
-            dataset = dataset.add_column(name="domain_name", column=[domain_name for _ in range(len(dataset))])
+            if isinstance(dataset, datasets.Dataset):
+                dataset = dataset.add_column(name="domain_name", column=[domain_name for _ in range(len(dataset))])
+            elif isinstance(dataset, datasets.IterableDataset):
+                dataset = dataset.map(
+                    lambda item, domain_name=domain_name: {"domain_name": domain_name}
+                )
+            else:
+                raise TypeError(f"Dataset type {type(dataset)} is not supported.")
         
         domain_ds[domain_name] = dataset
     
@@ -436,22 +466,23 @@ def load_domain_datasets(
         category_ds: Dict[str, datasets.Dataset] = dict()
         for category_name, domain_list in category_list.items():
             category_ds[category_name] = concatenate_datasets([domain_ds[i] for i in domain_list])
-        
-        if add_domain_id:
-            for domain_name in category_ds.keys():
-                category_ds[domain_name] = category_ds[domain_name].add_column(
-                    name="domain_ids", 
-                    column=np.ones(len(category_ds[domain_name]), dtype=np.int8) * domain_to_idx[domain_name]
-                )
-        return category_ds
-    else:
-        if add_domain_id:
-            for domain_name in domain_ds.keys():
+        domain_ds = category_ds
+    
+    if add_domain_id:
+        for domain_name in domain_ds.keys():
+            if isinstance(domain_ds[domain_name], datasets.Dataset):
                 domain_ds[domain_name] = domain_ds[domain_name].add_column(
                     name="domain_ids", 
                     column=np.ones(len(domain_ds[domain_name]), dtype=np.int8) * domain_to_idx[domain_name]
                 )
-        return domain_ds
+            elif isinstance(domain_ds[domain_name], datasets.IterableDataset):
+                domain_ds[domain_name] = domain_ds[domain_name].map(
+                    lambda item, domain_name=domain_name: {"domain_ids": domain_to_idx[domain_name]}
+                )
+            else:
+                raise TypeError(f"Dataset type {type(dataset)} is not supported.")
+    
+    return domain_ds
 
 def _average_weights(weights):
     if isinstance(weights, list):
@@ -474,11 +505,11 @@ def construct_domain_dataset(
         add_domain_name: bool = False,
         seed: int = 42,
         stopping_strategy: str = 'all_exhausted',
-        iterable_n_shards: int = 64,
         shuffle: bool = False,
         # Homogenous batch sampling
         homogenous_batch: bool = False,
-        global_batch_size: Optional[int] = None,
+        batch_size: Optional[int] = None,
+        streaming_load: bool = True
     ):
     """
     Construct interleavable datasets.
@@ -488,11 +519,17 @@ def construct_domain_dataset(
      - `preprocessed_dir`: Root folder path of all processed domains.
      - `prompt_type`: Prompt type. Different pre-defined prompts are listed in `prompts.py`.
      - `add_domain_id`: Add domain index.
+     - `add_domain_name`: Add domain name.
      - `seed`: Random seed for sampling.
      - `stopping_strategy`: Set to 'first_exhausted' for less sampling or 'all_exhausted' for oversampling.
                             See `datasets.interleave_datasets`
-     - `iterable_n_shards`: Defines the shards for each domain datasets when converted to iterable dataset.
      - `shuffle`: Shuffle each domain dataset with `seed`.
+     - `homogenous_batch`: Whether to use homogenous batch sampling. This enable sampling a 
+                            global batch size of samples from the same domain at a time.
+     - `batch_size`: Batch size per rank for homogenous batch sampling.
+     - `streaming_load`: Whether to load dataset in streaming mode. This option lazy load the dataset.
+                            However, whether or not streaming_load is enabled, the dataset is still
+                            returned as IterableDataset.
     """
     # Load domain weights from local file
     with open(domain_config_path, 'r') as f:
@@ -511,6 +548,7 @@ def construct_domain_dataset(
                     domain_names=domain_names,
                     preprocessed_dir=preprocessed_dir,
                     prompt_type=prompt_type,
+                    streaming=streaming_load,
                     add_domain_id=add_domain_id,
                     add_domain_name=add_domain_name,
                     seed=seed,
@@ -521,24 +559,28 @@ def construct_domain_dataset(
     logger.info(f"{len(domain_ds)} domains loaded. Lengths of each domain:")
     logger.info(f"Domain\t Lengths\t Sampling ratio")
     for _domain_name, _domain_dataset in domain_ds.items():
-        logger.info(f"{_domain_name}:\t {len(_domain_dataset)}\t {train_domain_weights_dict[_domain_name]}")
+        logger.info(f"{_domain_name}:\t {domain_config['size'][_domain_name]}\t {train_domain_weights_dict[_domain_name]}")
 
     # if homogenous_batch:
     #     # Multiprocess dataloading with Iterable dataset is currently not supported
     #     iterable_n_shards = 1
     
-    # Convert to IterableDataset and shuffle
+    # Convert to IterableDataset (Optional) and shuffle
     for _domain_name, _domain_dataset in domain_ds.items():
-        logger.info(f"Convert {_domain_name} to IterableDataset with {iterable_n_shards} shards.")
-        domain_ds[_domain_name] = _domain_dataset.to_iterable_dataset(iterable_n_shards)
+        if isinstance(_domain_dataset, datasets.Dataset):
+            ## `iterable_n_shards`: Defines the shards for each domain datasets when converted to iterable dataset.
+            iterable_n_shards: int = 256
+            logger.info(f"Convert {_domain_name} to IterableDataset with {iterable_n_shards} shards.")
+            domain_ds[_domain_name] = _domain_dataset.to_iterable_dataset(iterable_n_shards)
+        
         if shuffle:
             domain_ds[_domain_name] = domain_ds[_domain_name].shuffle(seed=seed, buffer_size=1000)
     
     if homogenous_batch:
-        logger.info(f"Using homogenous batch sampling with global batch size {global_batch_size}")
+        logger.info(f"Using homogenous batch sampling with batch size {batch_size} per rank")
         full_dataset: IterableDataset = interleave_datasets_homologenous(
                     datasets=[domain_ds[_domain] for _domain in domain_list],
-                    batch_size=global_batch_size,
+                    batch_size=batch_size,
                     probabilities=[train_domain_weights_dict[_domain] for _domain in domain_list],
                     seed=seed,
                     stopping_strategy=stopping_strategy,

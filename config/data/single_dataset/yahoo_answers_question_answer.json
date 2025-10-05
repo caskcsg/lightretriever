@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "yahoo_answers_question_answer": 0
+    },
+    "domain_weights": {
+        "yahoo_answers_question_answer": 1.0
+    },
+    "size": {
+        "yahoo_answers_question_answer": 681164
+    },
+    "epoch": {
+        "yahoo_answers_question_answer": 1.0
+    }
+}

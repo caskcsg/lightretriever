@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "xsum": 0
+    },
+    "domain_weights": {
+        "xsum": 1.0
+    },
+    "size": {
+        "xsum": 226711
+    },
+    "epoch": {
+        "xsum": 1.0
+    }
+}

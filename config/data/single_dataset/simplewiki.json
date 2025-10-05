@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "SimpleWiki": 0
+    },
+    "domain_weights": {
+        "SimpleWiki": 1.0
+    },
+    "size": {
+        "SimpleWiki": 102225
+    },
+    "epoch": {
+        "SimpleWiki": 1.0
+    }
+}

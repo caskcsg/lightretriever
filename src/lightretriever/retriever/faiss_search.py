@@ -209,7 +209,7 @@ class DenseRetrievalFaissSearch:
 
         logger.info("Sorting Corpus by document length (Longest first)...")
         if isinstance(corpus, dict):
-            corpus_ids = sorted(corpus, key=lambda k: len(corpus[k].get("text", "")), reverse=True)
+            corpus_ids = sorted(corpus, key=lambda k: len(corpus[k].get("text", "")) if isinstance(corpus[k], dict) else len(corpus[k]), reverse=True)
             corpus = [corpus[cid] for cid in corpus_ids]
         elif isinstance(corpus, datasets.Dataset):
             corpus = corpus.map(
@@ -242,7 +242,7 @@ class DenseRetrievalFaissSearch:
             corpus_end_idx = min(corpus_start_idx + self.corpus_chunk_size, len(corpus))
 
             # Step1: Encode chunk of corpus
-            if isinstance(corpus, dict):
+            if isinstance(corpus, list):
                 corpus_sliced = corpus[corpus_start_idx:corpus_end_idx]
             else:
                 corpus_sliced = corpus.select(range(corpus_start_idx, corpus_end_idx))
@@ -253,6 +253,12 @@ class DenseRetrievalFaissSearch:
                 show_progress_bar=self.show_progress_bar, 
                 convert_to_tensor=self.convert_to_tensor
             )
+            if isinstance(sub_corpus_embeddings, dict):
+                if "dense_reps" in sub_corpus_embeddings:
+                    logger.warning(f"sub_corpus_embeddings uses `dense_reps` by default. Available keys: {sub_corpus_embeddings.keys()}")
+                    sub_corpus_embeddings = sub_corpus_embeddings["dense_reps"]
+                else:
+                    raise ValueError(f"HybridModel: Return Multi-vector with keys {sub_corpus_embeddings.keys()}, but not `dense_reps`")
 
             # Step2: Indexing
             logger.info("Dense Indexing...")

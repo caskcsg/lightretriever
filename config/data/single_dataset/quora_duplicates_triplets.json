@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "quora_duplicates_triplets": 0
+    },
+    "domain_weights": {
+        "quora_duplicates_triplets": 1.0
+    },
+    "size": {
+        "quora_duplicates_triplets": 101762
+    },
+    "epoch": {
+        "quora_duplicates_triplets": 1.0
+    }
+}

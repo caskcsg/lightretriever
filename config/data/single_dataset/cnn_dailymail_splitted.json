@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "cnn_dailymail_splitted": 0
+    },
+    "domain_weights": {
+        "cnn_dailymail_splitted": 1.0
+    },
+    "size": {
+        "cnn_dailymail_splitted": 311971
+    },
+    "epoch": {
+        "cnn_dailymail_splitted": 1.0
+    }
+}

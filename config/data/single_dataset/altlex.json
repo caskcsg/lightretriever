@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "altlex": 0
+    },
+    "domain_weights": {
+        "altlex": 1.0
+    },
+    "size": {
+        "altlex": 112696
+    },
+    "epoch": {
+        "altlex": 1.0
+    }
+}

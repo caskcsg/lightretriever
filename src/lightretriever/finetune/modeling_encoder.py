@@ -10,12 +10,14 @@ import os
 import copy
 import json
 import yaml
+import functools
 from typing import Optional
 from itertools import chain
 from dataclasses import dataclass
 
 import torch
 from torch import nn, Tensor
+from torch.utils.checkpoint import checkpoint
 import torch.nn.functional as F
 import torch.distributed as dist
 from transformers import (
@@ -122,6 +124,14 @@ class EncoderModel(nn.Module):
             _no_split_modules_lm_p: list[str] = getattr(lm_p, "_no_split_modules", []) or []
             _no_split_modules_lm_q: list[str] = getattr(lm_q, "_no_split_modules", []) or []
             self._no_split_modules = list(set(chain(_no_split_modules_lm_p, _no_split_modules_lm_q)))
+
+    @property
+    def lm_q_unwrap(self):
+        return self.lm_q.get_base_model() if isinstance(self.lm_q, PeftModel) else self.lm_q
+
+    @property
+    def lm_p_unwrap(self):
+        return self.lm_p.get_base_model() if isinstance(self.lm_p, PeftModel) else self.lm_p
 
     def forward(
             self, 
@@ -241,7 +251,10 @@ class EncoderModel(nn.Module):
 
             # Labels of Cross Entropy
             # [0, 1, 2, ...] * train_n_passages
-            target = torch.arange(scores.shape[0], device=scores.device, dtype=torch.long) * n_psg
+            target = torch.arange(
+                        scores.shape[0], 
+                        device=scores.device, dtype=torch.long
+                    ) * n_psg
             
             # Cross Entropy Loss
             clloss: Tensor = self.cross_entropy(scores, target) * self.train_args.clloss_coef
@@ -277,6 +290,7 @@ class EncoderModel(nn.Module):
         )
     
     def _apply_gradient_checkpointing(self, model: PreTrainedModel, gradient_checkpointing_kwargs: dict = None):
+        gradient_checkpointing_kwargs = copy.deepcopy(gradient_checkpointing_kwargs)
         ds_config = gradient_checkpointing_kwargs.pop("ds_config", None)
         
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
@@ -347,7 +361,7 @@ class EncoderModel(nn.Module):
         # 1) Functional input `normalize==True`
         # 2) Functional input `normalize is None`, looking for `self.model_args.normalize`
         if normalize or (normalize is None and self.model_args.normalize):
-            p_reps = F.normalize(p_reps, p=2, dim=1)
+            p_reps = F.normalize(p_reps, p=2, dim=-1)
         return p_reps
 
     def encode_query(self, qry: Optional[BatchEncoding], normalize: Optional[bool] = None, **kwargs):
@@ -394,21 +408,69 @@ class EncoderModel(nn.Module):
         if self.model_args.dense_shrink_dim:
             q_reps = q_reps[..., :self.model_args.dense_shrink_dim]
         if normalize or (normalize is None and self.model_args.normalize):
-            q_reps = F.normalize(q_reps, p=2, dim=1)
+            q_reps = F.normalize(q_reps, p=2, dim=-1)
         return q_reps
 
     def compute_similarity(self, q_reps: Tensor, p_reps: Tensor):
         """
         Computes the dot-product dot_prod(a[i], b[j]) for all i and j.
-        Input:  1) q_reps: [batch_size, hidden_dim]
+        Input:  1) Single Token Vector (for contrastive loss)
+                    q_reps: [batch_size, hidden_dim]
                     p_reps: [batch_size * train_n_passages, hidden_dim]
                     return:  [batch_size, train_n_passages]
-                2) q_reps: [batch_size, 1, hidden_dim]
+                2) Single Token Vector (for distill)
+                    q_reps: [batch_size, 1, hidden_dim]
                     p_reps: [batch_size, train_n_passages, hidden_dim]
                     return:  [batch_size, 1, train_n_passages]
         Return: Matrix with res[i][j]  = dot_prod(a[i], b[j])
         """
         return torch.matmul(q_reps, p_reps.transpose(-2, -1))
+    
+        
+    def compute_similarity_chunked(
+        self,
+        q_reps: Tensor,
+        p_reps: Tensor,
+        chunk_size: int = 16,
+    ) -> Tensor:
+        """
+        Computes dot-product similarity with chunking to avoid high memory usage.
+        Supports both training and inference modes.
+        
+        Args:
+            q_reps (Tensor): Query representations.
+                - [batch_size, hidden_dim] for contrastive loss
+                - [batch_size, 1, hidden_dim] for distillation
+            p_reps (Tensor): Passage representations.
+                - [batch_size * train_n_passages, hidden_dim] for contrastive loss
+                - [batch_size, train_n_passages, hidden_dim] for distillation
+            chunk_size (int): Number of queries to process per chunk.
+        
+        Returns:
+            torch.Tensor: Similarity scores.
+                - [batch_size, train_n_passages] for contrastive loss
+                - [batch_size, 1, train_n_passages] for distillation
+        """
+        batch_size = q_reps.size(0)
+        all_scores: list[Tensor] = []
+
+        for i in range(0, batch_size, chunk_size):
+            q_reps_chunk = q_reps[i: min(i + chunk_size, batch_size)]
+
+            def compute_chunk(q_reps_chunk, p_reps):
+                return self.compute_similarity(q_reps_chunk, p_reps)
+
+            if self.training:
+                chunk_scores = checkpoint(
+                    compute_chunk, q_reps_chunk, p_reps, use_reentrant=False
+                )
+            else:
+                chunk_scores = compute_chunk(q_reps_chunk, p_reps)
+
+            all_scores.append(chunk_scores)
+
+        scores = torch.cat(all_scores, dim=0)
+        return scores
 
     def _dist_gather_tensor(self, t: Optional[Tensor]):
         """ All gather a Tensor with the same shape """
@@ -486,39 +548,29 @@ class EncoderModel(nn.Module):
             resize_emb(hf_model, tokenizer, pad_to_multiple_of=model_args.pad_to_multiple_of)
         
         return hf_model
-    
-    @classmethod
-    def _load_pooler(
-            cls,
-            model_name_or_path: str,
-        ) -> Optional[nn.Module]:
-        """ Helper functions to Load PyTorch Pooler if exists """
-        pooler_weights = os.path.join(model_name_or_path, 'pooler.pt')
-        pooler_config = os.path.join(model_name_or_path, 'pooler_config.json')
-        if os.path.exists(pooler_weights) and os.path.exists(pooler_config):
-            logger.info(f'found pooler weight and configuration')
-            with open(pooler_config) as f:
-                pooler_config_dict = json.load(f)
-            pooler = DenseLinearProjector(**pooler_config_dict)
-            pooler.load(model_name_or_path)
-        else:
-            pooler = None
-        
-        return pooler
-    
+
     @staticmethod
-    def _build_pooler(
-            projection_in_dim: int, 
-            projection_out_dim: int, 
-            model_name_or_path: str = ""
-        ):
-        """ Init a new Pooler """
-        pooler = DenseLinearProjector(
-            input_dim=projection_in_dim,
-            output_dim=projection_out_dim,
-        )
-        pooler.load(model_name_or_path)
-        return pooler
+    def _load_model_args(model_name_or_path: str):
+        """ Helper function to load model args from model_name_or_path """
+        _local_model_args_path = os.path.join(model_name_or_path, 'model_args.yaml')
+        logger.info(f"Reading config file from {_local_model_args_path}")
+        def _load_args_from_yaml() -> ModelArguments:
+            return HfArgumentParser(ModelArguments).parse_yaml_file(_local_model_args_path)[0]
+        
+        model_args = _load_args_from_yaml()
+
+        # Re-assign model_name_or_path
+        model_args.model_name_or_path = model_name_or_path
+        model_args.model_name_or_path_qry = model_name_or_path
+        model_args.model_name_or_path_psg = model_name_or_path
+        if model_args.untie_encoder:
+            _qry_model_path = os.path.join(model_name_or_path, 'query_model')
+            _psg_model_path = os.path.join(model_name_or_path, 'passage_model')
+            if os.path.exists(_qry_model_path) and os.path.exists(_psg_model_path):
+                model_args.model_name_or_path_qry = _qry_model_path
+                model_args.model_name_or_path_psg = _psg_model_path
+
+        return model_args
     
     @staticmethod
     def _build_lora_model(
@@ -556,55 +608,33 @@ class EncoderModel(nn.Module):
             if model_args.untie_encoder:                
                 logger.info(f'Loading query model weight from {model_args.model_name_or_path_qry}')
                 lm_q = cls._load_model(model_args.model_name_or_path_qry, model_args=model_args, merge_peft_weights=True, **hf_kwargs)
-                den_pooler_q = cls._load_pooler(model_args.model_name_or_path_qry)
-
                 logger.info(f'Loading passage model weight from {model_args.model_name_or_path_psg}')
                 lm_p = cls._load_model(model_args.model_name_or_path_psg, model_args=model_args, merge_peft_weights=True, **hf_kwargs)
-                den_pooler_p = cls._load_pooler(model_args.model_name_or_path_psg)
             else:
                 lm_q = cls._load_model(model_args.model_name_or_path, model_args=model_args, merge_peft_weights=True, **hf_kwargs)
                 lm_p = lm_q
-
-                den_pooler_q = cls._load_pooler(model_args.model_name_or_path)
-                den_pooler_p = den_pooler_q
         # Load checkpoint online
         else:
             lm_q = cls._load_model(model_args.model_name_or_path, model_args=model_args, merge_peft_weights=True, **hf_kwargs)
             lm_p = copy.deepcopy(lm_q) if model_args.untie_encoder else lm_q
-
-            # TODO: Pooler cannot be loaded online
-            den_pooler_q, den_pooler_p = None, None
         
         # Learnable MLP that project from in_dim to out_dim
+        den_pooler_q, den_pooler_p = None, None
         if model_args.add_pooler:
-            # Build Pooler from scratch if they are not loaded yet
-            if (den_pooler_q is None) or (den_pooler_p is None):
-                if model_args.projection_in_dim_qry is None:
-                    model_args.projection_in_dim_qry = lm_q.config.hidden_size  # Auto infer MLP Fan-in
-                den_pooler_q = cls._build_pooler(
-                    projection_in_dim=model_args.projection_in_dim_qry, 
-                    projection_out_dim=model_args.projection_out_dim_qry,
-                    model_name_or_path=model_args.model_name_or_path_qry,
-                )
-                if "torch_dtype" in hf_kwargs:
-                    den_pooler_q = den_pooler_q.to(dtype=hf_kwargs["torch_dtype"])
+            den_pooler_q = DenseLinearProjector.build(
+                                input_dim=lm_q.config.hidden_size,  # Auto infer MLP Fan-in
+                                output_dim=model_args.projection_out_dim_qry,
+                                model_dir=model_args.model_name_or_path_qry,
+                            ).to(device=lm_q.device, dtype=lm_q.dtype)
 
-                if model_args.untie_encoder:
-                    if model_args.projection_in_dim_psg is None:
-                        model_args.projection_in_dim_psg = lm_p.config.hidden_size  # Auto infer MLP Fan-in
-                    den_pooler_p = cls._build_pooler(
-                        projection_in_dim=model_args.projection_in_dim_psg, 
-                        projection_out_dim=model_args.projection_out_dim_psg,
-                        model_name_or_path=model_args.model_name_or_path_psg,
-                    )
-                    if "torch_dtype" in hf_kwargs:
-                        den_pooler_p = den_pooler_p.to(dtype=hf_kwargs["torch_dtype"])
-                else:
-                    if model_args.projection_in_dim_psg is None:
-                        model_args.projection_in_dim_psg = model_args.projection_in_dim_qry
-                    den_pooler_p = den_pooler_q
-        else:
-            assert (den_pooler_q is None) and (den_pooler_p is None), "Poolers are already loaded, but your setting is fine-tuning without them. Please further check your configuration."
+            if model_args.untie_encoder:
+                den_pooler_p = DenseLinearProjector.build(
+                                    input_dim=lm_p.config.hidden_size,  # Auto infer MLP Fan-in
+                                    output_dim=model_args.projection_out_dim_psg,
+                                    model_dir=model_args.model_name_or_path_psg,
+                                ).to(device=lm_p.device, dtype=lm_p.dtype)
+            else:
+                den_pooler_p = den_pooler_q
 
         # Enable input embedding require gradient
         if train_args.gradient_checkpointing:
@@ -647,71 +677,36 @@ class EncoderModel(nn.Module):
             model_args: All hyper-parameters for inferencing.
             train_args: Optional. Do not needed for inferencing.
         """
-        merge_peft_weights = train_args is None     # True: Inference/Initial Training(Build); False: Resume training
         # Resume model_args if not set
         if model_args is None:
-            _local_model_args_path = os.path.join(model_name_or_path, 'model_args.yaml')
-            if os.path.exists(_local_model_args_path):
-                logger.info(f"Reading config file from {_local_model_args_path}")
-                parsed_tuple = HfArgumentParser(ModelArguments).parse_yaml_file(_local_model_args_path)
-                model_args: ModelArguments = parsed_tuple[0]
-                model_args.model_name_or_path = model_name_or_path
+            model_args = cls._load_model_args(model_name_or_path)
+
+        merge_peft_weights = train_args is None     # True: Inference/Initial Training(Build); False: Resume training
+        if model_args.untie_encoder:
+            logger.info(f'Loading separate weight for query/passage encoders')
+            logger.info(f'Loading query model weight from {model_args.model_name_or_path_qry}')
+            lm_q = cls._load_model(model_args.model_name_or_path_qry, model_args=model_args, merge_peft_weights=merge_peft_weights, **hf_kwargs)
+            logger.info(f'Loading passage model weight from {model_args.model_name_or_path_psg}')
+            lm_p = cls._load_model(model_args.model_name_or_path_psg, model_args=model_args, merge_peft_weights=merge_peft_weights, **hf_kwargs)
+
+            if model_args.add_pooler:
+                den_pooler_q = DenseLinearProjector.load(model_args.model_name_or_path_qry).to(device=lm_q.device, dtype=lm_q.dtype)
+                den_pooler_p = DenseLinearProjector.load(model_args.model_name_or_path_psg).to(device=lm_p.device, dtype=lm_p.dtype)
             else:
-                raise FileNotFoundError(f"Please pass a model_args to initialize the model.")
-
-        # Load local
-        if os.path.isdir(model_name_or_path):
-            _qry_model_path = os.path.join(model_name_or_path, 'query_model')
-            _psg_model_path = os.path.join(model_name_or_path, 'passage_model')
-            if os.path.exists(_qry_model_path):
-                model_args.untie_encoder = True
-                model_args.model_name_or_path_qry = _qry_model_path
-                model_args.model_name_or_path_psg = _psg_model_path
-
-                logger.info(f'Found separate weight for query/passage encoders')
-                logger.info(f'Loading query model weight from {_qry_model_path}')
-                lm_q = cls._load_model(_qry_model_path, model_args=model_args, merge_peft_weights=merge_peft_weights, **hf_kwargs)
-
-                den_pooler_q = cls._load_pooler(_qry_model_path)
-                if den_pooler_q is not None:
-                    den_pooler_q = den_pooler_q.to(device=lm_q.device, dtype=lm_q.dtype)
-                
-                logger.info(f'Loading passage model weight from {_psg_model_path}')
-                lm_p = cls._load_model(_psg_model_path, model_args=model_args, merge_peft_weights=merge_peft_weights, **hf_kwargs)
-
-                den_pooler_p = cls._load_pooler(_psg_model_path)
-                if den_pooler_p is not None:
-                    den_pooler_p = den_pooler_p.to(device=lm_p.device, dtype=lm_p.dtype)
-            else:
-                model_args.untie_encoder = False
-                model_args.model_name_or_path_qry = model_name_or_path
-                model_args.model_name_or_path_psg = model_name_or_path
-
-                logger.info(f'Loading tied model weight from {model_name_or_path}')
-                lm_q = cls._load_model(model_name_or_path, model_args=model_args, merge_peft_weights=merge_peft_weights, **hf_kwargs)
-                lm_p = lm_q
-
-                den_pooler_q = cls._load_pooler(model_name_or_path)
-                if den_pooler_q is not None:
-                    den_pooler_q = den_pooler_q.to(device=lm_q.device, dtype=lm_q.dtype)
-                den_pooler_p = den_pooler_q
+                den_pooler_q = None
+                den_pooler_p = None
+        
         else:
-            model_args.untie_encoder = False
-            model_args.model_name_or_path_qry = model_name_or_path
-            model_args.model_name_or_path_psg = model_name_or_path
-            
             logger.info(f'Loading tied model weight from {model_name_or_path}')
             lm_q = cls._load_model(model_name_or_path, model_args=model_args, merge_peft_weights=merge_peft_weights, **hf_kwargs)
             lm_p = lm_q
 
-            # TODO: Poolers cannot be loaded online
-            den_pooler_q = cls._load_pooler(_qry_model_path)
-            if den_pooler_q is not None:
-                den_pooler_q = den_pooler_q.to(device=lm_q.device, dtype=lm_q.dtype)
+            if model_args.add_pooler:
+                den_pooler_q = DenseLinearProjector.load(model_name_or_path).to(device=lm_q.device, dtype=lm_q.dtype)
+            else:
+                den_pooler_q = None
+            
             den_pooler_p = den_pooler_q
-        
-        if (den_pooler_q is not None) or (den_pooler_p is not None):
-            model_args.add_pooler = True
 
         model = cls(
             lm_q=lm_q,

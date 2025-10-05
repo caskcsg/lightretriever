@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "mr_tydi_combined": 0
+    },
+    "domain_weights": {
+        "mr_tydi_combined": 1.0
+    },
+    "size": {
+        "mr_tydi_combined": 48715
+    },
+    "epoch": {
+        "mr_tydi_combined": 1.0
+    }
+}

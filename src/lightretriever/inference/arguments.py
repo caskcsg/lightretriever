@@ -8,7 +8,7 @@ Inferencing arguments.
 '''
 import os
 import logging
-from typing import Optional
+from typing import Optional, Union
 from dataclasses import dataclass, field
 
 from ..finetune.arguments import ModelArguments as RetrieverModelArguments
@@ -31,6 +31,14 @@ class InferenceArguments(RetrieverModelArguments):
                     "Choose among ['EncoderModel', 'ImbalancedEncoderModel', 'RerankerModel']."
         },
     )
+    inference_arch: str = field(
+        default="PytorchRPCExactSearchModel",
+        metadata={
+            "help": "The model archeticture used in training. "
+                    "Choose among [ "
+                    "    'PytorchRPCExactSearchModel' (RPC + Hybrid), "
+        },
+    )
     batch_size: int = field(
         default=64, metadata={"help": "Batch size for encoding."}
     )
@@ -38,7 +46,7 @@ class InferenceArguments(RetrieverModelArguments):
         default=False, metadata={"help": "Add a sep token [SEP] after the prompt."}
     )
 
-    # Model args
+    # Data args
     q_max_len: int = field(
         default=128, metadata={"help": "Query maxlen."}
     )
@@ -48,9 +56,18 @@ class InferenceArguments(RetrieverModelArguments):
     max_length: int = field(
         default=1024, metadata={"help": "Reranker maxlen."}
     )
-    padding: bool | str = field(
+    pad_to_max_length: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to pad all samples to `max_length`. "
+                    "If False, will pad the samples dynamically when batching to the maximum length in the batch."
+        },
+    )
+    padding: Union[bool, str] = field(
         default=True,
     )
+
+    # Model args
     bf16: bool = field(
         default=False, metadata={"help": "Bfloat16."}
     )
@@ -116,6 +133,9 @@ class InferenceArguments(RetrieverModelArguments):
 
     def __post_init__(self):
         super().__post_init__()
+
+        if self.pad_to_max_length:
+            self.padding = "max_length"
         
         # Init dist args
         if local_rank := os.getenv("LOCAL_RANK", None):

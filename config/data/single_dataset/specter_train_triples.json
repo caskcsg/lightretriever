@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "specter_train_triples": 0
+    },
+    "domain_weights": {
+        "specter_train_triples": 1.0
+    },
+    "size": {
+        "specter_train_triples": 136645
+    },
+    "epoch": {
+        "specter_train_triples": 1.0
+    }
+}

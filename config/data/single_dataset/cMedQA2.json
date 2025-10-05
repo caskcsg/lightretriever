@@ -1,0 +1,15 @@
+{
+    "domain_ids": {
+        "cMedQA2": 0
+    },
+    "domain_weights": {
+        "cMedQA2": 1.0
+    },
+    "size": {
+        "cMedQA2": 99936
+    },
+    "epoch": {
+        "cMedQA2": 1.0
+    },
+    "ref_length": 99936
+}

@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "hotpotqa": 0
+    },
+    "domain_weights": {
+        "hotpotqa": 1.0
+    },
+    "size": {
+        "hotpotqa": 85000
+    },
+    "epoch": {
+        "hotpotqa": 1.0
+    }
+}

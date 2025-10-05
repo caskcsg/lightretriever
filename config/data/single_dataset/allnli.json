@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "AllNLI": 0
+    },
+    "domain_weights": {
+        "AllNLI": 1.0
+    },
+    "size": {
+        "AllNLI": 277230
+    },
+    "epoch": {
+        "AllNLI": 1.0
+    }
+}

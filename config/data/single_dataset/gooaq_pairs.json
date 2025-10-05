@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "gooaq_pairs": 0
+    },
+    "domain_weights": {
+        "gooaq_pairs": 1.0
+    },
+    "size": {
+        "gooaq_pairs": 3012496
+    },
+    "epoch": {
+        "gooaq_pairs": 1.0
+    }
+}

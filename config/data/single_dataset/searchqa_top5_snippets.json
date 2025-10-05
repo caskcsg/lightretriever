@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "searchQA_top5_snippets": 0
+    },
+    "domain_weights": {
+        "searchQA_top5_snippets": 1.0
+    },
+    "size": {
+        "searchQA_top5_snippets": 117220
+    },
+    "epoch": {
+        "searchQA_top5_snippets": 1.0
+    }
+}

@@ -119,10 +119,6 @@ class ModelArguments(BaseModelArguments):
         default=False,
         metadata={"help": "Add a MLP layer on top of pooled embedding."}
     )
-    projection_in_dim: int = field(
-        default=None,
-        metadata={"help": "MLP Fan-in."}
-    )
     projection_out_dim: int = field(
         default=None,
         metadata={"help": "MLP Fan-out."}
@@ -157,17 +153,9 @@ class ModelArguments(BaseModelArguments):
             "help": "Pooling strategy of passage model. Choose between mean/cls/lasttoken. Will be overriden by `pooling_strategy`"
         },
     )
-    projection_in_dim_qry: Optional[int] = field(
-        default=None,
-        metadata={"help": "MLP Fan-in. Will be overrided if `projection_in_dim` is set."}
-    )
     projection_out_dim_qry: Optional[int] = field(
         default=None,
         metadata={"help": "MLP Fan-out. Will be overrided if `projection_out_dim` is set."}
-    )
-    projection_in_dim_psg: Optional[int] = field(
-        default=None,
-        metadata={"help": "MLP Fan-in. Will be overrided if `projection_in_dim` is set."}
     )
     projection_out_dim_psg: Optional[int] = field(
         default=None,
@@ -213,7 +201,7 @@ class ModelArguments(BaseModelArguments):
 
     # ==> Token id rep
     token_id_vector_type: str = field(
-        default="bow",
+        default="sum",
         metadata={
             "help": "Aggregation method of tokenized query input ids. Choose among ['bow', 'sum']. "
                     "1. `bow`: Directly use set(input_ids) as query's token id vector. `tok -> 1` "
@@ -254,9 +242,13 @@ class ModelArguments(BaseModelArguments):
         default=False,
         metadata={"help": "Whether to sparsify logits with unique token ids obtained from ICUWordPreTokenizer."}
     )
-    sparse_pool_from_original_input_ids: bool = field(
+    sparse_pool_from_original_input_ids_qry: bool = field(
         default=False,
-        metadata={"help": "Whether to pool the embedding only from token appear in the input ids."}
+        metadata={"help": "Whether to pool the sparse query embedding only from token appear in the input ids."}
+    )
+    sparse_pool_from_original_input_ids_psg: bool = field(
+        default=False,
+        metadata={"help": "Whether to pool the sparse passage embedding only from token appear in the input ids."}
     )
     sparse_min_tokens_to_keep: int = field(
         default=8,
@@ -344,23 +336,17 @@ class ModelArguments(BaseModelArguments):
             self.pooling_strategy_qry = self.pooling_strategy
             self.pooling_strategy_psg = self.pooling_strategy
         
-        if self.projection_in_dim:
-            self.projection_in_dim_qry = self.projection_in_dim
-            self.projection_in_dim_psg = self.projection_in_dim
-        
         if self.projection_out_dim:
             self.projection_out_dim_qry = self.projection_out_dim
             self.projection_out_dim_psg = self.projection_out_dim
 
 @dataclass
 class RetrieverTrainingArguments(BaseTrainingArguments):
-    # ** Contrastive Loss **
+    # Model Implementation Related
     clloss_coef: float = field(
         default=1.0,
         metadata={"help": "Scale factor for clloss."}
     )
-
-    # ** KL Loss **
     distillation: bool = field(
         default=False,
         metadata={"help": "KL loss between Retriever query-passage scores and CrossEncoder scores."}
@@ -373,8 +359,6 @@ class RetrieverTrainingArguments(BaseTrainingArguments):
         default=1.0,
         metadata={"help": "Temperature for distill loss."}
     )
-
-    # ** Other loss args **
     loss_reduction: str = field(
         default='mean', metadata={"help": "Loss reduction of CrossEntropy Loss. Choose among `mean`, `none`."}
     )
@@ -426,6 +410,30 @@ class RetrieverTrainingArguments(BaseTrainingArguments):
         metadata={
             "help": "Choose among ['quadratic', 'linear_decay']."
         }
+    )
+
+    # ** Imbalanced Dense Embedding **
+    emb_den_reps_distillation: bool = field(
+        default=False,
+        metadata={"help": "KL loss between Query Emb Reps & Query Den Reps."}
+    )
+    emb_den_scores_distillation: bool = field(
+        default=False,
+        metadata={"help": "KL loss between `Query Emb`-`Psg` Scores & `Query Den`-`Psg` Scores."}
+    )
+    emb_reps_distill_coef: float = field(
+        default=1.0,
+        metadata={"help": "Scale factor for Query Emb Reps distill loss."}
+    )
+
+    # ** Imbalanced Token id Embedding **
+    tok_den_scores_distillation: bool = field(
+        default=False,
+        metadata={"help": "KL loss between `Query Token id`-`Psg` Scores & `Query Den`-`Psg` Scores."}
+    )
+    tok_reps_distill_coef: float = field(
+        default=1.0,
+        metadata={"help": "Scale factor for Query Token id Reps distill loss."}
     )
 
     # ** Matryoshka Representation Learning during Training Stage **

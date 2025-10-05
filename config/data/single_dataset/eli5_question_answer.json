@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "eli5_question_answer": 0
+    },
+    "domain_weights": {
+        "eli5_question_answer": 1.0
+    },
+    "size": {
+        "eli5_question_answer": 325475
+    },
+    "epoch": {
+        "eli5_question_answer": 1.0
+    }
+}

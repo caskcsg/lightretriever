@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "npr": 0
+    },
+    "domain_weights": {
+        "npr": 1.0
+    },
+    "size": {
+        "npr": 594384
+    },
+    "epoch": {
+        "npr": 1.0
+    }
+}

@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "msmarco": 0
+    },
+    "domain_weights": {
+        "msmarco": 1.0
+    },
+    "size": {
+        "msmarco": 502939
+    },
+    "epoch": {
+        "msmarco": 1.0
+    }
+}

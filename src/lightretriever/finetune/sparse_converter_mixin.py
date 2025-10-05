@@ -19,6 +19,7 @@ from sparse_emb_util import Converter
 class SparseConverterMixin:
     def __init__(self, vocab_dict: Optional[dict[str, str]]=None):
         # Rust-based Converter, parsing sparse numpy float32/float16 vector to dict/string format fastly
+        self.vocab_dict = vocab_dict
         self.spr_converter = Converter(vocab_dict)
     
     def convert_sparse_reps_to_json(
@@ -180,7 +181,7 @@ class SparseConverterMixin:
                                         search query of Lucene or Tantivy
         """        
         # Quantization
-        json_reps = self.convert_sparse_reps_to_json(reps=reps, quantization_factor=quantization_factor, convert_id_to_token=convert_id_to_token)
+        json_reps = self.convert_sparse_reps_to_json_pt(reps=reps, quantization_factor=quantization_factor, convert_id_to_token=convert_id_to_token)
 
         # Text Format
         sparse_reps_text: list[str] = [" ".join(sum([[str(token)] * freq for token, freq in dict_rep.items()], [])) for dict_rep in json_reps]

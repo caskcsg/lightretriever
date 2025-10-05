@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "agnews": 0
+    },
+    "domain_weights": {
+        "agnews": 1.0
+    },
+    "size": {
+        "agnews": 1157745
+    },
+    "epoch": {
+        "agnews": 1.0
+    }
+}

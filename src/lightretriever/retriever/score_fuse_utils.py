@@ -47,7 +47,7 @@ def fuse_scores_rrf(
 
 def fuse_scores_linear(
     results_list: list[dict[str, dict[str, float]]],
-    weights: list[int] = [0.8, 0.2],
+    weights: list[int] = [0.7, 0.3],
     eps: float = 1e-8,
 ):
     """

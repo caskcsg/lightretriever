@@ -1,0 +1,15 @@
+{
+    "domain_ids": {
+        "S2ORC_title_abstract_100k": 0
+    },
+    "domain_weights": {
+        "S2ORC_title_abstract_100k": 1.0
+    },
+    "size": {
+        "S2ORC_title_abstract_100k": 99998
+    },
+    "epoch": {
+        "S2ORC_title_abstract_100k": 1.0
+    },
+    "ref_length": 99998
+}

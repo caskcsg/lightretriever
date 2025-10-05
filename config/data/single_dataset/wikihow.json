@@ -1,0 +1,14 @@
+{
+    "domain_ids": {
+        "wikihow": 0
+    },
+    "domain_weights": {
+        "wikihow": 1.0
+    },
+    "size": {
+        "wikihow": 128543
+    },
+    "epoch": {
+        "wikihow": 1.0
+    }
+}
