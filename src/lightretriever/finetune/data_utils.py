@@ -55,7 +55,6 @@ class TrainCollator(DataCollatorWithPadding):
     word_tokenizer: Optional[ICUWordPreTokenizer] = None   # ICU Word Tokenizer
     emb_size: Optional[int] = None      # Used to create bow / bce label
     
-    use_nested_tensor: bool = False 
     gpt_is_casual: bool = True
     
     def _get_query(self, item: dict[str, str], prepend_prompt=True, prepend_whitespace=False) -> str:

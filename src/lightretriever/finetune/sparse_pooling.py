@@ -272,7 +272,7 @@ def aggregate(
     # TODO: Add efficient mean aggregation
     else:
         logits: Tensor = lm_head.forward(hidden_states)
-        logits = logits.masked_fill(~sparse_attention_mask, torch.finfo(logits.dtype).min)
+        logits = logits.masked_fill(~sparse_attention_mask.unsqueeze(-1), torch.finfo(logits.dtype).min)
         logits = torch.mean(logits, dim=1)
 
     return logits

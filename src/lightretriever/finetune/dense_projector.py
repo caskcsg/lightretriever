@@ -116,7 +116,7 @@ class DenseLinearProjector(nn.Module):
         projector = cls(
             input_dim=projector_config['input_dim'], 
             output_dim=projector_config['output_dim'],
-            initializer_range=projector_config['initializer_range'],
+            initializer_range=projector_config.get('initializer_range', 0.02),
         )
 
         projector_path = os.path.join(model_dir, cls.WEIGHT_NAME)

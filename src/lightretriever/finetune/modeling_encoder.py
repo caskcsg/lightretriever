@@ -232,7 +232,7 @@ class EncoderModel(nn.Module):
                 p_reps_full = p_reps
 
             # Similarity computation
-            scores = self.compute_similarity(q_reps_full, p_reps_full) / temperature
+            scores = self.compute_similarity_chunked(q_reps_full, p_reps_full) / temperature
 
             # Mask in/cross-batch negatives, only use hard negatives
             if only_hn is not None:
@@ -472,19 +472,102 @@ class EncoderModel(nn.Module):
         scores = torch.cat(all_scores, dim=0)
         return scores
 
-    def _dist_gather_tensor(self, t: Optional[Tensor]):
-        """ All gather a Tensor with the same shape """
+    @staticmethod
+    def _dist_gather_tensor(
+        t: Optional[Tensor],
+        group: Optional[dist.ProcessGroup] = None
+    ) -> Optional[torch.Tensor]:
+        """ 
+        All gather a Tensor with the same shape across processes.
+        Concatenates along dim=0 and ensures gradient flows correctly.
+        
+        Args:
+            t: A local tensor of shape [B, ...]
+            group: Optional process group
+        
+        Returns:
+            A tensor of shape [B * world_size, ...] with all gathered tensors concatenated along dim=0
+        """
         if t is None:
             return None
         t = t.contiguous()
 
-        all_tensors = [torch.empty_like(t) for _ in range(self.world_size)]
+        if group is None:
+            group = dist.group.WORLD
+
+        rank = dist.get_rank(group)
+        world_size = dist.get_world_size(group)
+
+        all_tensors = [torch.empty_like(t) for _ in range(world_size)]
         dist.all_gather(all_tensors, t)
 
-        all_tensors[self.process_rank] = t
+        # Replace this rank's copy with original tensor for gradient flow
+        all_tensors[rank] = t
         all_tensors = torch.cat(all_tensors, dim=0)
 
         return all_tensors
+    
+    @staticmethod
+    def _dist_gather_tensor_variable_batch(
+        t: Optional[torch.Tensor],
+        group: Optional[dist.ProcessGroup] = None
+    ) -> Optional[torch.Tensor]:
+        """
+        All-gather tensors with different first dimension (batch size) across processes.
+        Concatenates along dim=0 and ensures gradient flows correctly.
+        
+        Args:
+            t: A local tensor of shape [B_i, ...] (can be different B_i on each rank)
+            group: Optional process group
+        
+        Returns:
+            A tensor of shape [sum(B_i), ...] with all gathered tensors concatenated along dim=0
+        """
+        if t is None:
+            return None
+        t = t.contiguous()
+        
+        if group is None:
+            group = dist.group.WORLD
+
+        rank = dist.get_rank(group)
+        world_size = dist.get_world_size(group)
+
+        # Step 1: Get local batch size
+        local_size = torch.tensor([t.size(0)], device=t.device, dtype=torch.long)
+
+        # Step 2: Gather all batch sizes into a tensor
+        size_buf = torch.empty(world_size, dtype=torch.long, device=t.device)
+
+        try:
+            # If available, use efficient all_gather_into_tensor
+            dist.all_gather_into_tensor(size_buf, local_size, group=group)
+        except AttributeError:
+            # Fallback for older PyTorch
+            tmp = list(size_buf.chunk(world_size, dim=0))
+            dist.all_gather(tmp, local_size, group=group)
+
+        sizes = size_buf.tolist()
+        max_size = max(sizes)
+
+        # Step 3: Pad tensor to max batch size
+        if t.size(0) < max_size:
+            pad_shape = (max_size - t.size(0),) + t.shape[1:]
+            padding = torch.zeros(pad_shape, dtype=t.dtype, device=t.device)
+            t_padded = torch.cat([t, padding], dim=0)
+        else:
+            t_padded = t
+
+        # Step 4: Gather padded tensors from all ranks
+        gather_list = [torch.empty_like(t_padded) for _ in range(world_size)]
+        dist.all_gather(gather_list, t_padded, group=group)
+
+        # Step 5: Replace this rank's copy with original tensor for gradient flow
+        gather_list[rank] = t
+
+        # Step 6: Trim padding and concatenate
+        trimmed = [gather_list[i][:sizes[i]] for i in range(world_size)]
+        return torch.cat(trimmed, dim=0)
 
     def klloss(self, student_scores: Tensor, teacher_scores: Tensor) -> Tensor:
         """ Calculate klloss for distilation from teacher to student """
@@ -555,7 +638,7 @@ class EncoderModel(nn.Module):
         _local_model_args_path = os.path.join(model_name_or_path, 'model_args.yaml')
         logger.info(f"Reading config file from {_local_model_args_path}")
         def _load_args_from_yaml() -> ModelArguments:
-            return HfArgumentParser(ModelArguments).parse_yaml_file(_local_model_args_path)[0]
+            return HfArgumentParser(ModelArguments).parse_yaml_file(_local_model_args_path, allow_extra_keys=True)[0]
         
         model_args = _load_args_from_yaml()
 

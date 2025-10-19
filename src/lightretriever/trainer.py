@@ -196,7 +196,6 @@ class ContrastiveTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
     
     def training_step(self, *args, **kwargs):
-        # Scale back the loss after backwards, to correct log the actual loss scale.
         loss = super().training_step(*args, **kwargs)
 
         # RegWeightScheduler

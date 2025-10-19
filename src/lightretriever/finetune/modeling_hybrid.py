@@ -7,15 +7,13 @@ Hybrid (Dense + Sparse) Model Implementation.
 @Author  :   Ma (Ma787639046@outlook.com)
 '''
 import os
-import time
-from typing import Callable, Optional
+from typing import Optional
 from collections import defaultdict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from torch.utils.checkpoint import checkpoint
 
 from transformers import (
     AutoModelForMaskedLM, 
@@ -27,15 +25,8 @@ from transformers import (
     XLMRobertaForMaskedLM,
     XLMRobertaForCausalLM,
     GPTNeoXForCausalLM,
-    LlamaForCausalLM, 
-    MistralForCausalLM, 
-    PhiForCausalLM, 
-    Qwen2ForCausalLM,
 )
-from transformers.configuration_utils import PretrainedConfig
-from transformers.modeling_outputs import BaseModelOutput, CausalLMOutputWithPast
-from transformers.models.bert.modeling_bert import BertLMPredictionHead
-from transformers.models.xlm_roberta.modeling_xlm_roberta import XLMRobertaLMHead
+from transformers.modeling_outputs import BaseModelOutput
 from peft import PeftModel
 
 from .arguments import ModelArguments, DataArguments, \

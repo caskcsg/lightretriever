@@ -264,12 +264,6 @@ class ModelArguments(BaseModelArguments):
         default=False,
         metadata={"help": "Whether to use relu for pooling sparse vectors"}
     )
-    sparsify_bias: Optional[float] = field(
-        default=None,
-        metadata={
-            "help": "Calculte `logits = logits - sparsify_bias` before applying sparsify losses."
-        }
-    )
     sparse_use_log_saturation: bool = field(
         default=False,
         metadata={"help": "Whether to use log saturation for pooling sparse vectors"}
@@ -451,7 +445,6 @@ class RetrieverTrainingArguments(BaseTrainingArguments):
 
     # *** GradCache ***
     grad_cache: bool = field(default=False, metadata={"help": "Use gradient cache update"})
-    grad_cache_ac: bool = field(default=False, metadata={"help": "Use gradient cache + activation checkpointing"})
     gc_q_chunk_size: int = field(default=32)
     gc_p_chunk_size: int = field(default=4)
     gc_dynamic_chunking: bool = field(default=False, metadata={"help": "Dynamic adjust the chunk size of GradCache."})
